@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 import Logger from './logging.js';
 
 const logger = Logger.getLogger('ProcessManager');
@@ -28,35 +29,63 @@ export class ProcessManager {
   }): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
+        // Use absolute path to locally built llama-server if available
+        const projectRoot = process.cwd();
+        const localLlamaServerWindows = projectRoot + '\\llama.cpp\\llama-server.exe';
+        const localLlamaServerUnix = projectRoot + '/llama.cpp/llama-server';
+
+        let llamaServerPath = 'llama-server'; // Default fallback
+
+        // Try Windows path first
+        try {
+          if (fs.existsSync(localLlamaServerWindows)) {
+            llamaServerPath = localLlamaServerWindows;
+            logger.info(`[FOUND] Using local Windows llama-server: ${llamaServerPath}`);
+          } else if (fs.existsSync(localLlamaServerUnix)) {
+            llamaServerPath = localLlamaServerUnix;
+            logger.info(`[FOUND] Using local Unix llama-server: ${llamaServerPath}`);
+          } else {
+            logger.warn(`[NOT FOUND] Checking: ${localLlamaServerWindows}`);
+            logger.warn(`[NOT FOUND] Checking: ${localLlamaServerUnix}`);
+            logger.info(`[FALLBACK] Using system PATH llama-server`);
+          }
+        } catch (err) {
+          logger.error(`[ERROR] Exception checking files: ${err}`);
+          logger.info(`[FALLBACK] Using system PATH llama-server`);
+        }
+
         // Construct llama-server command
-        // Note: Assumes llama.cpp is installed globally or in PATH
         const args = [
           '-m', config.modelPath,
-          '-p', '8000',
-          `--port ${config.port}`,
+          '--port', String(config.port),
           '--threads', String(config.threads),
           '-c', String(config.contextSize),
         ];
 
+        // Add GPU flags if available (split by space if string)
         if (config.gpuFlags) {
-          args.push(config.gpuFlags);
+          const gpuArgs = config.gpuFlags.split(/\s+/).filter((arg: string) => arg.length > 0);
+          args.push(...gpuArgs);
         }
 
-        logger.info(`Starting llama.cpp server with command: llama-server ${args.join(' ')}`);
+        logger.info(`[SPAWN] Starting with args: ${args.join(' ')}`);
 
-        this.process = spawn('llama-server', args, {
+        this.process = spawn(llamaServerPath, args, {
           stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: 30000,
+          detached: false,  // Keep process attached to parent for proper cleanup
         });
+
+        let resolved = false;
 
         // Capture stdout
         this.process.stdout?.on('data', (data) => {
           const line = data.toString();
           this.stdout.push(line);
-          logger.debug(`llama-server: ${line.trim()}`);
+          logger.debug(`llama-server stdout: ${line.trim()}`);
 
           // Check if server is ready
-          if (line.includes('listening on') || line.includes('Ready')) {
+          if ((line.includes('listening on') || line.includes('Ready')) && !resolved) {
+            resolved = true;
             this.isRunning = true;
             resolve();
           }
@@ -67,12 +96,30 @@ export class ProcessManager {
           const line = data.toString();
           this.stderr.push(line);
           logger.warn(`llama-server stderr: ${line.trim()}`);
+
+          // Check if server is ready (stderr also includes startup messages)
+          if ((line.includes('listening on') || line.includes('Ready')) && !resolved) {
+            resolved = true;
+            this.isRunning = true;
+            resolve();
+          }
+
+          // Log any error messages for debugging
+          if (line.toLowerCase().includes('error') || line.toLowerCase().includes('fatal')) {
+            logger.error(`llama-server error output: ${line.trim()}`);
+          }
         });
 
         // Handle process exit
         this.process.on('exit', (code, signal) => {
           this.isRunning = false;
           logger.info(`llama-server exited with code ${code}, signal ${signal}`);
+          
+          // Log last stderr lines for debugging process exit
+          if (this.stderr.length > 0) {
+            const lastErrors = this.stderr.slice(-5).join(' | ');
+            logger.info(`Last stderr output: ${lastErrors}`);
+          }
         });
 
         this.process.on('error', (error) => {
@@ -86,19 +133,26 @@ export class ProcessManager {
             // Set mock mode flag
             this.isMockMode = true;
             this.isRunning = true;
-            resolve();
+            if (!resolved) {
+              resolved = true;
+              resolve();
+            }
           } else {
             logger.error(`Failed to start llama-server: ${error}`);
-            reject(error);
+            if (!resolved) {
+              resolved = true;
+              reject(error);
+            }
           }
         });
 
-        // Timeout if server doesn't start within 30 seconds
-        setTimeout(() => {
-          if (!this.isRunning && this.process) {
-            reject(new Error('llama-server startup timeout'));
+        // Timeout if server doesn't start within 60 seconds (model loading can be slow)
+        const startupTimeout = setTimeout(() => {
+          if (!this.isRunning && this.process && !resolved) {
+            resolved = true;
+            reject(new Error('llama-server startup timeout - model loading exceeded 60 seconds'));
           }
-        }, 30000);
+        }, 60000);
       } catch (error) {
         logger.error(`Error spawning llama-server: ${error}`);
         reject(error);

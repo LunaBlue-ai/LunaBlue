@@ -208,6 +208,70 @@ Content-Type: application/json
 
 Returns Server-Sent Events (SSE) stream of response chunks.
 
+### Chat with Persistent History (Phase 3.1)
+
+#### Create Session
+```bash
+POST /api/chat/sessions
+Content-Type: application/json
+
+{
+  "sessionId": "sess-123",
+  "userId": "user-456",
+  "title": "My Chat Session",
+  "modelId": "phi-3-mini-4k-instruct"
+}
+```
+
+#### Send Message with Auto-Save
+```bash
+POST /api/chat
+Content-Type: application/json
+
+{
+  "text": "What is machine learning?",
+  "sessionId": "sess-123",
+  "userId": "user-456",
+  "modelId": "phi-3-mini-4k-instruct"
+}
+```
+
+Response:
+```json
+{
+  "success": true,
+  "sessionId": "sess-123",
+  "userId": "user-456",
+  "prompt": "What is machine learning?",
+  "response": "Machine learning is a subset of AI...",
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+#### Get Session History
+```bash
+GET /api/chat/sessions/sess-123/messages?limit=50&offset=0
+```
+
+#### Search Conversations
+```bash
+POST /api/chat/search
+Content-Type: application/json
+
+{
+  "userId": "user-456",
+  "query": "machine learning",
+  "limit": 20
+}
+```
+
+#### View Chat Statistics
+```bash
+GET /api/chat/stats
+```
+
+Returns database statistics including total sessions, messages, and users.
+
 ## 🧠 DoNoHarm Knowledge Base
 
 The `DoNoHarm/` folder contains markdown files that are loaded into LunaBlueAI's context at startup:
@@ -308,25 +372,151 @@ MIT License - see LICENSE file
 
 ## 🎯 Roadmap
 
-### Phase 1 (Current)
+### Phase 1 ✅ Complete
 - ✅ Core orchestrator
 - ✅ llama.cpp integration
 - ✅ REST API
 - ✅ Configuration system
 - ✅ Model management
 
-### Phase 2
-- Web UI with text input/output
-- Multi-model switching
-- DoNoHarm context injection
-- GPU acceleration
-- Performance monitoring
+### Phase 2 ✅ Complete
+- ✅ Web UI with text input/output
+- ✅ Multi-model switching infrastructure
+- ✅ DoNoHarm context injection 
+- ✅ GPU acceleration detection
+- ✅ Performance monitoring
+- ✅ Streaming responses
 
-### Phase 3
-- Advanced model management
-- Persistent chat history
-- Fine-tuning framework
-- Model market integration
+### Phase 3 - Advanced Features (In Progress)
+
+#### Phase 3.1 ✅ Complete - Chat History & Persistence
+- ✅ SQLite-based persistent chat storage
+- ✅ Multi-user session management
+- ✅ Message history with role tracking (user/assistant)
+- ✅ Model usage analytics and statistics
+- ✅ Full-text search across conversations
+- ✅ 10+ REST API endpoints for chat operations
+- ✅ Automatic token tracking and estimation
+- ✅ Session archiving and management
+
+#### Phase 3.2 - Model Hot-Swapping (Next)
+- Model lifecycle management without server restart
+- Graceful model switching
+- State preservation across model changes
+- Memory management optimization
+
+#### Phase 3.3 - Fine-tuning Framework
+- LoRA adapter support
+- Instruction fine-tuning interface
+- Dataset management
+- Training progress monitoring
+
+#### Phase 3.4 - Model Marketplace
+- Discover and install community models
+- Model ratings and reviews
+- Version management
+- License handling
+
+#### Phase 3.5 - Advanced Analytics
+- Usage tracking per user/model
+- Performance metrics and insights
+- Response quality evaluation
+- Cost estimation and optimization
+
+## 🧠 Chat History Database
+
+LunaBlue uses SQLite with Write-Ahead Logging (WAL) for persistent, concurrent chat history storage. The database is automatically created at `data/lunablue.db` on first startup.
+
+### Database Schema
+
+**Sessions Table**
+```sql
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  title TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  model_id TEXT,
+  system_prompt TEXT,
+  metadata TEXT,
+  archived BOOLEAN DEFAULT 0
+);
+```
+
+**Messages Table**
+```sql
+CREATE TABLE messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL,  -- 'user', 'assistant', or 'system'
+  content TEXT NOT NULL,
+  model_id TEXT,
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+```
+
+**Model Usage Table**
+```sql
+CREATE TABLE model_usage (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  prompt_count INTEGER,
+  total_tokens_input INTEGER,
+  total_tokens_output INTEGER,
+  total_duration_ms INTEGER,
+  last_used INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+```
+
+### Automatic Features
+
+- **Token Tracking**: Input and output tokens tracked separately for each message
+- **Usage Statistics**: Model performance metrics recorded per user and model
+- **Concurrent Access**: WAL mode enables safe concurrent read/write operations
+- **Automatic Indexing**: Indexes created on frequently queried columns for performance
+- **Cascading Deletes**: Deleting a session automatically removes all associated messages
+
+### Accessing Chat History
+
+#### Programmatic Access (TypeScript)
+```typescript
+import { ChatHistory } from './src/utils/chatHistory';
+
+const history = new ChatHistory();
+
+// Create session
+history.createSession('sess-1', 'user-1', 'My Chat');
+
+// Add message
+history.addMessage('msg-1', 'sess-1', 'user', 'Hello!', 'phi-3-mini', 
+  { input: 2, output: 0 });
+
+// Get messages
+const messages = history.getSessionMessages('sess-1', 50);
+
+// Search
+const results = history.searchMessages('user-1', 'keyword', 20);
+
+// Get statistics
+const stats = history.getStats();
+```
+
+#### REST API Access
+See "Chat with Persistent History" section under API Endpoints above.
+
+### Database Location
+
+The chat history database is stored at:
+- **Default**: `{project-root}/data/lunablue.db`
+- **Custom**: Pass custom path to `ChatHistory` constructor
+
+The `data/` directory is created automatically if it doesn't exist.
 
 ## 🤝 Contributing
 
