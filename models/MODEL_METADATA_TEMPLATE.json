@@ -1,0 +1,52 @@
+{
+  "metadata": {
+    "model_id": "unique-model-identifier",
+    "name": "Model Display Name",
+    "description": "Detailed description of the model",
+    "version": "1.0.0",
+    "release_date": "YYYY-MM-DD"
+  },
+  "specifications": {
+    "parameters": "3.8B",
+    "context_window": 4096,
+    "architecture": "Transformer",
+    "quantization": "Q4_K_M",
+    "quantization_bits": 4,
+    "file_size_gb": 2.0,
+    "format": "GGUF"
+  },
+  "performance": {
+    "min_memory_gb": 4,
+    "recommended_memory_gb": 8,
+    "tokens_per_second_cpu": 10,
+    "tokens_per_second_gpu": 50,
+    "latency_ms_cpu": 100,
+    "latency_ms_gpu": 20
+  },
+  "capabilities": {
+    "language": "English",
+    "instruction_following": true,
+    "math": false,
+    "code_generation": true,
+    "context_window_extended": false
+  },
+  "system_requirements": {
+    "os": ["Windows", "macOS", "Linux"],
+    "min_cpu_cores": 2,
+    "min_cpu_gb": 4,
+    "gpu_support": ["NVIDIA (CUDA)", "Apple (Metal)", "AMD (Vulkan)"],
+    "gpu_vram_gb": 2
+  },
+  "source": {
+    "organization": "Source Organization",
+    "repository_url": "https://huggingface.co/organization/model-name",
+    "license": "MIT",
+    "license_url": "https://opensource.org/licenses/MIT"
+  },
+  "checksums": {
+    "sha256": "abcdef123456...",
+    "md5": "123456abcdef..."
+  },
+  "created_at": "2026-04-18T00:00:00Z",
+  "last_updated": "2026-04-18T00:00:00Z"
+}

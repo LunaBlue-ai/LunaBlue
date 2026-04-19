@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+venv/
+*.egg-info/
+__pycache__/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Models (large files)
+models/**/*.gguf
+models/**/*.bin
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime
+temp/
+tmp/
+cache/
+
+# Test
+coverage/
+.nyc_output/

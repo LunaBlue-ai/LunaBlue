@@ -1,0 +1,35 @@
+{
+  "default_model": "phi-3-mini-4k-instruct",
+  "models": [
+    {
+      "id": "phi-3-mini-4k-instruct",
+      "name": "Phi-3 Mini (4K Context)",
+      "type": "offline",
+      "format": "gguf",
+      "source": "huggingface",
+      "repository": "microsoft/Phi-3-mini-4k-instruct-gguf",
+      "filename": "Phi-3-mini-4k-instruct-q4.gguf",
+      "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
+      "local_path": "./models/phi-3-mini/",
+      "context_window": 4096,
+      "parameters": "3.8B",
+      "quantization": "Q4_K_M",
+      "active": true,
+      "gpu_accelerated": true,
+      "min_memory_gb": 4,
+      "recommended_memory_gb": 8
+    }
+  ],
+  "llama_cpp": {
+    "port": 8000,
+    "host": "127.0.0.1",
+    "threads": "auto",
+    "gpu_layers": "auto",
+    "log_level": "info"
+  },
+  "donoharm": {
+    "folder": "./DoNoHarm/",
+    "enabled": true,
+    "preload_on_startup": true
+  }
+}
