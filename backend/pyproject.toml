@@ -17,6 +17,7 @@ dependencies = [
     "alembic",
     "greenlet",
     "llama-cpp-python",
+    "langgraph",
 ]
 
 [project.optional-dependencies]

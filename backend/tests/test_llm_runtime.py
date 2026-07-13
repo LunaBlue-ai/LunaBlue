@@ -1,7 +1,8 @@
 """Tests for the LLM runtime (Step 7).
 
-All tests run against a fake ``Llama`` class injected via ``llama_factory``,
-so the suite needs neither a model file nor the ``llama-cpp-python`` package.
+All tests run against a fake ``Llama`` class injected via ``llama_factory``
+(see ``tests.fakes``), so the suite needs neither a model file nor the
+``llama-cpp-python`` package.
 """
 
 import asyncio
@@ -18,67 +19,7 @@ from app.llm.runtime import (
     load_system_prompt,
 )
 from app.main import create_app
-
-
-class FakeLlama:
-    """Mimics ``llama_cpp.Llama`` closely enough for runtime tests."""
-
-    def __init__(self, *, model_path, n_ctx, n_gpu_layers, verbose, **_):
-        self.model_path = model_path
-        self.n_ctx = n_ctx
-        self.n_gpu_layers = n_gpu_layers
-        self.calls: list[dict] = []
-        self.busy = False
-        self.concurrent_entry = False
-        self.block_seconds = 0.0
-        self.closed = False
-
-    def create_chat_completion(self, *, messages, **params):
-        if self.busy:
-            # Two threads inside the (not concurrency-safe) instance at once.
-            self.concurrent_entry = True
-        self.busy = True
-        try:
-            if self.block_seconds:
-                time.sleep(self.block_seconds)  # simulates blocking inference
-            self.calls.append({"messages": messages, **params})
-            user = next(m["content"] for m in messages if m["role"] == "user")
-            return {
-                "choices": [
-                    {
-                        "message": {"content": f"echo: {user}"},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 7,
-                    "completion_tokens": 3,
-                    "total_tokens": 10,
-                },
-            }
-        finally:
-            self.busy = False
-
-    def close(self):
-        self.closed = True
-
-
-def make_runtime(tmp_path, **kwargs) -> tuple[LlamaRuntime, FakeLlama]:
-    """A loaded runtime backed by FakeLlama and a real (empty) model file."""
-    model_file = tmp_path / "model.gguf"
-    model_file.write_bytes(b"gguf")
-    holder: list[FakeLlama] = []
-
-    def factory(**factory_kwargs):
-        fake = FakeLlama(**factory_kwargs)
-        holder.append(fake)
-        return fake
-
-    runtime = LlamaRuntime(
-        model_path=str(model_file), llama_factory=factory, **kwargs
-    )
-    runtime.load()
-    return runtime, holder[0]
+from tests.fakes import FakeAuditService, FakeLlama, make_app, make_runtime
 
 
 def test_missing_model_file_fails_fast_with_actionable_error(tmp_path):
@@ -198,23 +139,6 @@ def make_client(runtime) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-async def test_debug_generate_route_returns_output_and_usage(tmp_path):
-    runtime, fake = make_runtime(tmp_path)
-    async with make_client(runtime) as client:
-        resp = await client.post(
-            "/api/debug/generate", json={"prompt": "ping", "max_tokens": 16}
-        )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["text"] == "echo: ping"
-    assert body["model_id"] == "model.gguf"
-    assert body["usage"]["total_tokens"] == 10
-    # Default system persona applied when none supplied.
-    assert fake.calls[0]["messages"][0]["role"] == "system"
-    assert "LunaBlue" in fake.calls[0]["messages"][0]["content"]
-    assert fake.calls[0]["max_tokens"] == 16
-
-
 async def test_readiness_reports_model_state(tmp_path):
     # Model loaded, but no database engine: readiness must still answer (503)
     # and carry the model field. Dispose any engine a previous test left.
@@ -240,9 +164,12 @@ async def test_readiness_reports_model_state(tmp_path):
 async def test_health_liveness_answers_while_generation_runs(tmp_path):
     runtime, fake = make_runtime(tmp_path)
     fake.block_seconds = 0.2
-    async with make_client(runtime) as client:
+    app = make_app(FakeAuditService(), runtime)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
         generation = asyncio.create_task(
-            client.post("/api/debug/generate", json={"prompt": "busy"})
+            client.post("/api/prompt", json={"text": "busy"})
         )
         await asyncio.sleep(0.02)  # generation is now in flight
         started = time.perf_counter()
@@ -252,3 +179,4 @@ async def test_health_liveness_answers_while_generation_runs(tmp_path):
         assert elapsed < 0.15  # answered while inference still blocking
         gen_resp = await generation
     assert gen_resp.status_code == 200
+    assert gen_resp.json()["response_text"] == "echo: busy"

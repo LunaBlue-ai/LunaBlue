@@ -1,31 +1,33 @@
 """Prompt submission endpoint.
 
 Routing only (per docs/Components/API.md): validate, delegate, respond. The
-raw text flows through governance intake (``PromptIntake.review``); both the
-raw and reviewed prompt plus the governance decision are audited. Steps 7-9
-slot the LLM pipeline underneath this handler without changing the contract.
+governance → LLM → audit sequence lives in
+:class:`~app.orchestration.pipeline.PromptPipeline`; this handler just maps
+its outcomes onto the stable Step 5 wire contract. Step 9 swaps the pipeline
+internals for LangGraph execution without touching this module.
 """
 
-import uuid
-from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 
 from app.api.schemas.prompt import PromptRequest, PromptResponse
-from app.audit.service import AuditService, get_audit_service
-from app.governance.intake import (
-    IntakeContext,
-    PromptIntake,
-    PromptRejectedError,
-    get_prompt_intake,
+from app.governance.intake import PromptRejectedError
+from app.orchestration.pipeline import (
+    GenerationFailedError,
+    PromptPipeline,
+    get_prompt_pipeline,
 )
 
 router = APIRouter()
 
-# Stub marker prepended to every response until the LLM pipeline exists
-# (Step 7). Only response_text changes when the real pipeline lands.
-_STUB_PREFIX = "[stub] LunaBlue received your prompt: "
+# Client-facing text for failed generations. The real error summary is in the
+# audit log, never in the response — it may carry internals.
+_FAILED_RESPONSE_TEXT = (
+    "LunaBlue could not generate a response for this request. "
+    "The failure has been recorded; please try again."
+)
 
 
 @router.post(
@@ -34,71 +36,55 @@ _STUB_PREFIX = "[stub] LunaBlue received your prompt: "
     summary="Submit a prompt",
     description=(
         "Accepts a prompt, assigns it a UUID request id, runs governance "
-        "intake (normalization, policy tagging), records it in the audit "
-        "log, and returns a response. If no `session_id` is supplied a new "
-        "session is created and its id returned. The response text is "
-        "currently a canned stub echoing the reviewed prompt; the shape of "
-        "this contract is stable and will not change when the real LLM "
-        "pipeline replaces the stub. Invalid prompts (empty, whitespace-only, "
-        "or over the size limit) are rejected with 422 and are not audited. "
-        "Prompts rejected by governance policy return 400 with the reason "
-        "and are audited with a rejected governance flag."
+        "intake (normalization, policy tagging), generates a response with "
+        "the local LLM, records the full request/response chain in the audit "
+        "log, and returns the generated text. If no `session_id` is supplied "
+        "a new session is created and its id returned. Invalid prompts "
+        "(empty, whitespace-only, or over the size limit) are rejected with "
+        "422 and are not audited. Prompts rejected by governance policy "
+        "return 400 with the reason and are audited with a rejected "
+        "governance flag. If generation fails or times out, the response is "
+        "a 500 with `status=\"failed\"` and the failure is audited."
     ),
     responses={
         400: {"description": "Rejected by governance policy; detail carries the reason."},
         422: {"description": "Validation error: empty or oversized prompt."},
+        500: {
+            "model": PromptResponse,
+            "description": (
+                "Generation failed or timed out; body carries "
+                '`status="failed"`.'
+            ),
+        },
     },
 )
 async def submit_prompt(
     payload: PromptRequest,
-    audit: Annotated[AuditService, Depends(get_audit_service)],
-    intake: Annotated[PromptIntake, Depends(get_prompt_intake)],
+    pipeline: Annotated[PromptPipeline, Depends(get_prompt_pipeline)],
 ) -> PromptResponse:
-    request_id = str(uuid.uuid4())
-    session_id = payload.session_id or str(uuid.uuid4())
-
-    # SessionEvent upserts, so emitting unconditionally both creates new
-    # sessions and touches existing ones — and, because audit events are
-    # written in order, guarantees the session row exists before the
-    # prompt_requests FK references it.
-    audit.record_session(
-        session_id, user_id=payload.user_id, metadata=payload.metadata
-    )
-
-    context = IntakeContext(
-        session_id=session_id, user_id=payload.user_id, metadata=payload.metadata
-    )
     try:
-        reviewed = intake.review(payload.text, context)
-    except PromptRejectedError as exc:
-        # Rejections are audited too: raw text untouched, plus whatever the
-        # intake produced before rejecting (normalized text, version) and the
-        # governance metadata carrying the rejected decision.
-        audit.record_prompt_request(
-            request_id,
+        result = await pipeline.run(
             payload.text,
-            session_id=session_id,
+            session_id=payload.session_id,
             user_id=payload.user_id,
-            reviewed_prompt=exc.reviewed_text,
-            prompt_version=exc.prompt_version,
-            governance=exc.metadata.to_dict(),
+            metadata=payload.metadata,
         )
+    except PromptRejectedError as exc:
         raise HTTPException(status_code=400, detail=exc.reason) from exc
-
-    audit.record_prompt_request(
-        request_id,
-        payload.text,
-        session_id=session_id,
-        user_id=payload.user_id,
-        reviewed_prompt=reviewed.reviewed_text,
-        prompt_version=reviewed.prompt_version,
-        governance=reviewed.governance.to_dict(),
-    )
+    except GenerationFailedError as exc:
+        failed = PromptResponse(
+            request_id=exc.request_id,
+            session_id=exc.session_id,
+            status="failed",
+            response_text=_FAILED_RESPONSE_TEXT,
+            created_at=exc.created_at,
+        )
+        return JSONResponse(status_code=500, content=failed.model_dump(mode="json"))
 
     return PromptResponse(
-        request_id=request_id,
-        session_id=session_id,
+        request_id=result.request_id,
+        session_id=result.session_id,
         status="completed",
-        response_text=_STUB_PREFIX + reviewed.reviewed_text,
-        created_at=datetime.now(timezone.utc),
+        response_text=result.response_text,
+        created_at=result.created_at,
     )

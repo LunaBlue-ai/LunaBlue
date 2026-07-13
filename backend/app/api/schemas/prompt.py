@@ -1,8 +1,9 @@
 """Public request/response contract for the prompt API.
 
 These models are the stable wire format for ``POST /api/prompt``: the
-frontend (Step 11) mirrors them in TypeScript, and Steps 6-9 change only how
-``response_text`` is produced, never this shape.
+frontend (Step 11) mirrors them in TypeScript, and pipeline evolution
+(Step 9's LangGraph internals) changes only how ``response_text`` is
+produced, never this shape.
 
 Validation policy: malformed input (empty, whitespace-only, or oversized
 prompts; overlong ids) is rejected with 422 *before* the route handler runs,
@@ -78,8 +79,8 @@ class PromptResponse(BaseModel):
     )
     response_text: str = Field(
         description=(
-            "The assistant output. Stubbed until the LLM pipeline lands "
-            "(Step 7+)."
+            "The assistant output: model-generated text on success, or a "
+            "generic failure notice when status is \"failed\"."
         )
     )
     created_at: datetime = Field(

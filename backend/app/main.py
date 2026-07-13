@@ -14,13 +14,15 @@ from app.config import get_settings
 from app.governance.intake import PromptIntake
 from app.governance.policy import PolicyEngine
 from app.llm.runtime import LlamaRuntime, ModelNotFoundError
+from app.orchestration.pipeline import PromptPipeline
+from app.state.store import StateStore
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup/shutdown hooks. Later steps add the state store here."""
+    """Startup/shutdown hooks."""
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level.upper(),
@@ -36,10 +38,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     audit_service = AuditService()
     audit_service.start()
     app.state.audit_service = audit_service
-    app.state.prompt_intake = PromptIntake(
+    intake = PromptIntake(
         PolicyEngine(strict_mode=settings.governance_strict_mode),
         max_length=settings.governance_max_prompt_length,
     )
+    app.state.prompt_intake = intake
     # The single global LLM runtime (docs/Architecture.md). Loading is
     # deliberately fail-fast: a missing model file aborts startup with an
     # actionable message rather than serving a half-alive process.
@@ -60,6 +63,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await db.dispose_engine()
         raise
     app.state.llm_runtime = runtime
+    # The shared in-memory state store: live sessions/runs, served by the
+    # status APIs and streamed over WebSockets from Step 13. Purely in-memory
+    # — nothing to tear down on shutdown.
+    state_store = StateStore(max_finished_runs=settings.state_max_finished_runs)
+    app.state.state_store = state_store
+    app.state.prompt_pipeline = PromptPipeline(
+        intake=intake,
+        runtime=runtime,
+        audit=audit_service,
+        store=state_store,
+        timeout_seconds=settings.llm_timeout_seconds,
+    )
     try:
         yield
     finally:

@@ -34,11 +34,13 @@ class Settings(BaseSettings):
     llm_gpu_layers: int = 0
     llm_max_tokens: int = 512
     llm_temperature: float = 0.7
+    llm_timeout_seconds: float = 120.0
     host: str = "127.0.0.1"
     port: int = 8000
     ws_enabled: bool = True
     governance_strict_mode: bool = False
     governance_max_prompt_length: int = 32_000
+    state_max_finished_runs: int = 256
     log_level: str = "INFO"
 
     @property
