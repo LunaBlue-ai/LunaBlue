@@ -1,17 +1,20 @@
-# Dependencies
-node_modules/
-venv/
-*.egg-info/
+# Python
 __pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
 
-# Build outputs
-dist/
-build/
-*.tsbuildinfo
+# Node
+node_modules/
+frontend/dist/
 
-# Models (large files)
-models/**/*.gguf
-models/**/*.bin
+# Build artifacts — built frontend copied into backend/app/static at build time
+backend/app/static/*
+!backend/app/static/.gitkeep
+
+# Model files (large binaries fetched by scripts/download_model)
+models/*.gguf
+models/*.bin
 
 # Environment
 .env
@@ -28,17 +31,3 @@ models/**/*.bin
 # OS
 .DS_Store
 Thumbs.db
-
-# Logs
-logs/
-*.log
-npm-debug.log*
-
-# Runtime
-temp/
-tmp/
-cache/
-
-# Test
-coverage/
-.nyc_output/
