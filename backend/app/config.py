@@ -13,7 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # The .env file lives at the repository root (next to .env.example), two
 # levels above this file. A local backend/.env is also honored and wins,
 # since uvicorn is normally launched from backend/.
-_REPO_ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT_ENV = _REPO_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -26,16 +27,31 @@ class Settings(BaseSettings):
     )
 
     database_url: str = (
-        "postgresql+psycopg://lunablue:lunablue@localhost:5432/lunablue"
+        "postgresql+asyncpg://lunablue:lunablue@localhost:5432/lunablue"
     )
     model_path: str = "./models/model.gguf"
     llm_context_size: int = 4096
     llm_gpu_layers: int = 0
+    llm_max_tokens: int = 512
+    llm_temperature: float = 0.7
     host: str = "127.0.0.1"
     port: int = 8000
     ws_enabled: bool = True
     governance_strict_mode: bool = False
+    governance_max_prompt_length: int = 32_000
     log_level: str = "INFO"
+
+    @property
+    def resolved_model_path(self) -> Path:
+        """``model_path`` as an absolute path.
+
+        Relative values (the ``.env.example`` default ``./models/model.gguf``)
+        are anchored at the repository root, not the process CWD — uvicorn is
+        normally launched from ``backend/``, which would otherwise silently
+        look in ``backend/models/``.
+        """
+        path = Path(self.model_path)
+        return path if path.is_absolute() else (_REPO_ROOT / path).resolve()
 
 
 @lru_cache

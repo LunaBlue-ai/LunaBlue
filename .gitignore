@@ -15,6 +15,7 @@ backend/app/static/*
 # Model files (large binaries fetched by scripts/download_model)
 models/*.gguf
 models/*.bin
+models/*.partial
 
 # Environment
 .env
