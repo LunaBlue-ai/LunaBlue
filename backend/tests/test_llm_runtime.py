@@ -91,6 +91,29 @@ async def test_concurrent_generations_serialize_and_both_complete(tmp_path):
     assert sorted(r.text for r in results) == ["echo: one", "echo: two"]
 
 
+async def test_foreground_calls_jump_ahead_of_queued_background_ones(tmp_path):
+    """Step 14 scheduling: while a generation is in flight, a waiting
+    foreground call gets the next turn even if a background one queued first."""
+    runtime, fake = make_runtime(tmp_path)
+    fake.block_seconds = 0.05
+
+    first = asyncio.create_task(runtime.generate("first"))
+    await asyncio.sleep(0.01)  # first is now inside the (blocked) model
+    background = asyncio.create_task(
+        runtime.generate("background", background=True)
+    )
+    await asyncio.sleep(0.01)  # background queued ahead of foreground
+    foreground = asyncio.create_task(runtime.generate("foreground"))
+
+    await asyncio.gather(first, background, foreground)
+    order = [
+        next(m["content"] for m in call["messages"] if m["role"] == "user")
+        for call in fake.calls
+    ]
+    assert order == ["first", "foreground", "background"]
+    assert not fake.concurrent_entry
+
+
 async def test_event_loop_stays_responsive_during_generation(tmp_path):
     runtime, fake = make_runtime(tmp_path)
     fake.block_seconds = 0.2

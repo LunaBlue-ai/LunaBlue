@@ -39,7 +39,7 @@ class RunStatus(BaseModel):
     phase: str = Field(
         description=(
             "Current phase: received, governance, engineering, reviewing, "
-            "responding, completed, or failed."
+            "spawning, responding, completed, or failed."
         )
     )
     current_node: str | None = Field(
@@ -82,7 +82,7 @@ class SessionSummary(BaseModel):
 
 
 class AgentTaskRecord(BaseModel):
-    """One queued unit of background agent work (populated from Step 14)."""
+    """One queued unit of background agent work (Step 14)."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -92,15 +92,38 @@ class AgentTaskRecord(BaseModel):
 
 
 class AgentStatus(BaseModel):
-    """Live status snapshot of one background agent (populated from Step 14);
-    the WebSocket ``agent_updated`` payload."""
+    """Live status snapshot of one background agent (Step 14); the WebSocket
+    ``agent_updated`` payload."""
 
     model_config = ConfigDict(from_attributes=True)
 
     agent_id: str = Field(description="Agent identifier.")
+    kind: str = Field(description="Registered agent type (e.g. research).")
     session_id: str | None = Field(description="Session the agent serves, if any.")
-    state: str = Field(description="Agent lifecycle state.")
+    request_id: str | None = Field(
+        description="Prompt run that spawned the agent, if any."
+    )
+    state: str = Field(
+        description=(
+            "Agent lifecycle state: pending, running, completed, failed, "
+            "or cancelled."
+        )
+    )
     created_at: datetime = Field(description="When the agent was created (UTC).")
     updated_at: datetime = Field(description="Last agent state change (UTC).")
-    last_result: str | None = Field(description="Summary of the agent's last result.")
-    queued_tasks: list[AgentTaskRecord] = Field(description="Pending queued tasks.")
+    progress_phase: str | None = Field(
+        description="Agent-reported phase label while running."
+    )
+    progress_fraction: float | None = Field(
+        description="Agent-reported completion estimate (0.0–1.0), if any."
+    )
+    last_result: str | None = Field(
+        description=(
+            "Short result summary once completed (the full payload is in the "
+            "agent_events audit record)."
+        )
+    )
+    error: str | None = Field(description="Error summary once failed.")
+    queued_tasks: list[AgentTaskRecord] = Field(
+        description="Queued work not yet picked up by a worker."
+    )

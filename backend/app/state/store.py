@@ -31,18 +31,26 @@ logger = logging.getLogger(__name__)
 
 # Every phase a prompt run moves through, in nominal order. The pipeline owns
 # received/governance and the terminal transitions; the graph node wrappers
-# (orchestration/graph.py) own engineering/reviewing/responding.
+# (orchestration/graph.py) own engineering/reviewing/spawning/responding.
+# ``spawning`` only appears on runs the review routed through agent_spawn.
 RUN_PHASES = (
     "received",
     "governance",
     "engineering",
     "reviewing",
+    "spawning",
     "responding",
     "completed",
     "failed",
 )
 TERMINAL_PHASES = frozenset({"completed", "failed"})
 _INTERMEDIATE_PHASES = frozenset(RUN_PHASES) - TERMINAL_PHASES
+
+# Background agent lifecycle (Step 14): pending → running → one terminal state.
+# The AgentRunner drives every transition; the store just enforces that
+# terminal states are final.
+AGENT_STATES = ("pending", "running", "completed", "failed", "cancelled")
+TERMINAL_AGENT_STATES = frozenset({"completed", "failed", "cancelled"})
 
 
 def _utcnow() -> datetime:
@@ -91,7 +99,7 @@ class SessionSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class AgentTask:
-    """One queued unit of background work (populated from Step 14)."""
+    """One queued unit of background work (Step 14)."""
 
     task_id: str
     description: str
@@ -100,14 +108,19 @@ class AgentTask:
 
 @dataclass(frozen=True, slots=True)
 class AgentSnapshot:
-    """Point-in-time view of one background agent (populated from Step 14)."""
+    """Point-in-time view of one background agent (Step 14)."""
 
     agent_id: str
+    kind: str
     session_id: str | None
+    request_id: str | None  # prompt run that spawned the agent
     state: str
     created_at: datetime
     updated_at: datetime
-    last_result: str | None
+    progress_phase: str | None  # agent-reported phase label while running
+    progress_fraction: float | None  # 0.0–1.0 completion estimate, if reported
+    last_result: str | None  # short result summary (full payload is audited)
+    error: str | None  # failure summary once failed
     queued_tasks: tuple[AgentTask, ...]
 
 
@@ -210,24 +223,38 @@ class _SessionRecord:
 
 @dataclass(slots=True)
 class _AgentRecord:
-    """Registry entry for one background agent. Step 14 populates these."""
+    """Registry entry for one background agent (Step 14)."""
 
     agent_id: str
+    kind: str
     session_id: str | None
+    request_id: str | None
     state: str
     created_at: datetime
     updated_at: datetime
+    progress_phase: str | None = None
+    progress_fraction: float | None = None
     last_result: str | None = None
+    error: str | None = None
     task_queue: deque[AgentTask] = field(default_factory=deque)
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in TERMINAL_AGENT_STATES
 
     def snapshot(self) -> AgentSnapshot:
         return AgentSnapshot(
             agent_id=self.agent_id,
+            kind=self.kind,
             session_id=self.session_id,
+            request_id=self.request_id,
             state=self.state,
             created_at=self.created_at,
             updated_at=self.updated_at,
+            progress_phase=self.progress_phase,
+            progress_fraction=self.progress_fraction,
             last_result=self.last_result,
+            error=self.error,
             queued_tasks=tuple(self.task_queue),
         )
 
@@ -348,6 +375,83 @@ class StateStore:
         self._emit([StoreEvent("session_updated", snapshot)])
         return snapshot
 
+    # -- agent mutations (driven by orchestration/runner.py, Step 14) -------------
+
+    async def register_agent(
+        self,
+        agent_id: str,
+        *,
+        kind: str,
+        task: str,
+        session_id: str | None = None,
+        request_id: str | None = None,
+    ) -> AgentSnapshot:
+        """Register a new background agent in the ``pending`` state.
+
+        The task description sits in the agent's queue until the runner picks
+        it up (``update_agent(state="running")`` clears it).
+        """
+        async with self._lock:
+            if agent_id in self._agents:
+                raise ValueError(f"agent {agent_id!r} already exists")
+            now = _utcnow()
+            record = _AgentRecord(
+                agent_id=agent_id,
+                kind=kind,
+                session_id=session_id,
+                request_id=request_id,
+                state="pending",
+                created_at=now,
+                updated_at=now,
+            )
+            record.task_queue.append(
+                AgentTask(task_id=agent_id, description=task, enqueued_at=now)
+            )
+            self._agents[agent_id] = record
+            snapshot = record.snapshot()
+        self._emit([StoreEvent("agent_updated", snapshot)])
+        return snapshot
+
+    async def update_agent(
+        self,
+        agent_id: str,
+        *,
+        state: str | None = None,
+        progress_phase: str | None = None,
+        progress_fraction: float | None = None,
+        last_result: str | None = None,
+        error: str | None = None,
+    ) -> AgentSnapshot | None:
+        """Advance an agent's lifecycle state and/or progress.
+
+        Terminal states are final: updates for unknown or already-terminal
+        agents are ignored (returns ``None``), so a late progress report from
+        an agent that was just cancelled cannot resurrect it. Passing
+        ``state="running"`` clears the queued task — the runner picked it up.
+        """
+        if state is not None and state not in AGENT_STATES:
+            raise ValueError(f"invalid agent state {state!r}")
+        async with self._lock:
+            record = self._agents.get(agent_id)
+            if record is None or record.terminal:
+                return None
+            if state is not None:
+                record.state = state
+                if state != "pending":
+                    record.task_queue.clear()
+            if progress_phase is not None:
+                record.progress_phase = progress_phase
+            if progress_fraction is not None:
+                record.progress_fraction = min(1.0, max(0.0, progress_fraction))
+            if last_result is not None:
+                record.last_result = last_result
+            if error is not None:
+                record.error = error
+            record.updated_at = _utcnow()
+            snapshot = record.snapshot()
+        self._emit([StoreEvent("agent_updated", snapshot)])
+        return snapshot
+
     async def _finish_run(
         self,
         request_id: str,
@@ -439,6 +543,11 @@ class StateStore:
         """Snapshots of every retained run (in-flight and recently finished)."""
         return tuple(record.snapshot() for record in self._runs.values())
 
+    def get_agent(self, agent_id: str) -> AgentSnapshot | None:
+        """Snapshot of one background agent, or ``None`` if unknown."""
+        record = self._agents.get(agent_id)
+        return None if record is None else record.snapshot()
+
     def list_agents(self) -> tuple[AgentSnapshot, ...]:
-        """Snapshots of all registered agents (empty until Step 14)."""
+        """Snapshots of all registered background agents."""
         return tuple(record.snapshot() for record in self._agents.values())

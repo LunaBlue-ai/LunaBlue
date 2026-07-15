@@ -38,6 +38,7 @@ from app.audit.service import AuditService
 from app.governance.intake import IntakeContext, PromptIntake, PromptRejectedError
 from app.llm.runtime import LlamaRuntime
 from app.orchestration.graph import MainGraphState, build_main_graph
+from app.orchestration.runner import AgentRunner
 from app.state.store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ class PromptPipeline:
         audit: AuditService,
         store: StateStore,
         timeout_seconds: float,
+        runner: AgentRunner | None = None,
     ) -> None:
         self._intake = intake
         self._runtime = runtime
@@ -117,8 +119,9 @@ class PromptPipeline:
         self._store = store
         self._timeout_seconds = timeout_seconds
         # Compiled once per process (the lifespan builds one pipeline); the
-        # store bound here makes each node entry advance the run's phase.
-        self._graph = build_main_graph(runtime, store)
+        # store bound here makes each node entry advance the run's phase, and
+        # the runner (Step 14) enables the agent-spawn detour.
+        self._graph = build_main_graph(runtime, store, runner)
 
     async def run(
         self,

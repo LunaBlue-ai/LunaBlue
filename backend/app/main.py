@@ -19,6 +19,7 @@ from app.governance.intake import PromptIntake
 from app.governance.policy import PolicyEngine
 from app.llm.runtime import LlamaRuntime, ModelNotFoundError
 from app.orchestration.pipeline import PromptPipeline
+from app.orchestration.runner import AgentRunner
 from app.state.events import EventBus
 from app.state.store import StateStore
 
@@ -88,18 +89,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     event_bus = EventBus()
     state_store.set_notify(event_bus.publish)
     app.state.event_bus = event_bus
+    # Background agent execution (Step 14): spawned by the main graph's
+    # agent_spawn node, sharing the single runtime/store/audit stack.
+    agent_runner = AgentRunner(
+        runtime=runtime,
+        store=state_store,
+        audit=audit_service,
+        workers=settings.agent_workers,
+    )
+    agent_runner.start()
+    app.state.agent_runner = agent_runner
     app.state.prompt_pipeline = PromptPipeline(
         intake=intake,
         runtime=runtime,
         audit=audit_service,
         store=state_store,
         timeout_seconds=settings.llm_timeout_seconds,
+        runner=agent_runner,
     )
     try:
         yield
     finally:
-        # Drain queued audit events before tearing down the engine they
-        # write through.
+        # Cancel running/pending agents first so their cancellation audit
+        # events are still queued, then drain queued audit events before
+        # tearing down the engine they write through.
+        await agent_runner.close()
         await audit_service.close()
         runtime.close()
         await db.dispose_engine()

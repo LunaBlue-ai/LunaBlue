@@ -36,6 +36,7 @@ export type RunPhase =
   | "governance"
   | "engineering"
   | "reviewing"
+  | "spawning"
   | "responding"
   | "completed"
   | "failed"
@@ -87,14 +88,28 @@ export interface AgentTaskRecord {
   enqueued_at: string;
 }
 
-/** Mirrors `AgentStatus` in `api/schemas/state.py` (populated from Step 14). */
+/** Agent lifecycle states (`api/schemas/state.py`); wire type stays open. */
+export type AgentState =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | (string & {});
+
+/** Mirrors `AgentStatus` in `api/schemas/state.py` (Step 14). */
 export interface AgentStatus {
   agent_id: string;
+  kind: string;
   session_id: string | null;
-  state: string;
+  request_id: string | null;
+  state: AgentState;
   created_at: string;
   updated_at: string;
+  progress_phase: string | null;
+  progress_fraction: number | null;
   last_result: string | null;
+  error: string | null;
   queued_tasks: AgentTaskRecord[];
 }
 

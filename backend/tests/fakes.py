@@ -12,6 +12,7 @@ from app.governance.policy import PolicyEngine
 from app.llm.runtime import LlamaRuntime
 from app.main import create_app
 from app.orchestration.pipeline import PromptPipeline
+from app.orchestration.runner import AgentRunner
 from app.state.events import EventBus
 from app.state.store import StateStore
 
@@ -99,6 +100,7 @@ class FakeAuditService:
     sessions: list[dict[str, Any]] = field(default_factory=list)
     prompt_requests: list[dict[str, Any]] = field(default_factory=list)
     prompt_responses: list[dict[str, Any]] = field(default_factory=list)
+    agent_events: list[dict[str, Any]] = field(default_factory=list)
 
     def record_session(self, session_id, *, user_id=None, metadata=None):
         self.sessions.append(
@@ -121,6 +123,23 @@ class FakeAuditService:
     def record_prompt_response(self, request_id, **kwargs):
         self.prompt_responses.append({"request_id": request_id, **kwargs})
 
+    def record_agent_event(
+        self, agent_id, event_type, *, request_id=None, state=None, payload=None
+    ):
+        self.agent_events.append(
+            {
+                "agent_id": agent_id,
+                "event_type": event_type,
+                "request_id": request_id,
+                "state": state,
+                "payload": payload,
+            }
+        )
+
+    def events_for(self, agent_id) -> list[dict[str, Any]]:
+        """The audited lifecycle for one agent, in emission order."""
+        return [e for e in self.agent_events if e["agent_id"] == agent_id]
+
 
 def make_app(
     audit,
@@ -142,12 +161,17 @@ def make_app(
     app.state.llm_runtime = runtime
     app.state.state_store = store
     app.state.event_bus = event_bus
+    # Not started here (starting workers needs a running loop); tests that
+    # exercise agent execution call app.state.agent_runner.start() themselves.
+    runner = AgentRunner(runtime=runtime, store=store, audit=audit)
+    app.state.agent_runner = runner
     app.state.prompt_pipeline = PromptPipeline(
         intake=intake,
         runtime=runtime,
         audit=audit,
         store=store,
         timeout_seconds=timeout,
+        runner=runner,
     )
     return app
 

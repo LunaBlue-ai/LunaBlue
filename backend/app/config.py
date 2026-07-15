@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     governance_strict_mode: bool = False
     governance_max_prompt_length: int = 32_000
     state_max_finished_runs: int = 256
+    agent_workers: int = 1
     log_level: str = "INFO"
 
     @property

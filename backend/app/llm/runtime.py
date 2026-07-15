@@ -7,15 +7,23 @@ outside ``app.llm`` — callers depend on :class:`LlamaRuntime` via
 :func:`get_llm_runtime`.
 
 Concurrency model: ``llama.cpp`` inference is blocking and not safe to call
-concurrently on one instance. :meth:`LlamaRuntime.generate` therefore holds an
-``asyncio.Lock`` (callers queue up in order) and runs the actual completion in
-a worker thread, so the event loop — and with it ``/api/health`` — stays
-responsive while a generation is in flight.
+concurrently on one instance. :meth:`LlamaRuntime.generate` therefore
+serializes all calls and runs the actual completion in a worker thread, so the
+event loop — and with it ``/api/health`` — stays responsive while a generation
+is in flight.
+
+Scheduling (Step 14): foreground (main-graph) generations take priority over
+background agent ones. Calls marked ``background=True`` only acquire the
+model when no foreground caller is waiting, so a prompt request queues behind
+at most the single generation already in flight — never behind a backlog of
+agent work. Within each priority class the order is FIFO; an in-flight
+generation is never preempted.
 """
 
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -30,6 +38,50 @@ _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 def load_system_prompt(name: str = "system") -> str:
     """Read a prompt template from ``app/llm/prompts/<name>.md``."""
     return (_PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8").strip()
+
+
+class _PriorityGate:
+    """A mutex with two FIFO wait queues: foreground acquirers always get the
+    next turn ahead of queued background ones (see module docstring).
+
+    Same hand-off discipline as ``asyncio.Lock``: :meth:`release` transfers
+    ownership directly to the chosen waiter, and a waiter cancelled after the
+    hand-off passes the lock on instead of leaking it. ``release`` is
+    deliberately synchronous so it is always safe in a ``finally``.
+    """
+
+    def __init__(self) -> None:
+        self._locked = False
+        self._foreground: deque[asyncio.Future[None]] = deque()
+        self._background: deque[asyncio.Future[None]] = deque()
+
+    async def acquire(self, *, background: bool = False) -> None:
+        if not self._locked:
+            self._locked = True
+            return
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        queue = self._background if background else self._foreground
+        queue.append(fut)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                # The lock was handed to us just as we were cancelled: pass
+                # it straight to the next waiter.
+                self.release()
+            else:
+                queue.remove(fut)
+            raise
+        # Ownership was transferred by release(); _locked is still True.
+
+    def release(self) -> None:
+        for queue in (self._foreground, self._background):
+            while queue:
+                fut = queue.popleft()
+                if not fut.done():
+                    fut.set_result(None)
+                    return
+        self._locked = False
 
 
 class ModelNotFoundError(RuntimeError):
@@ -95,8 +147,9 @@ class LlamaRuntime:
         self._llama_factory = llama_factory
         self._llama: Any = None
         self._model_id = Path(model_path).name
-        # Serializes all inference on the single Llama instance.
-        self._lock = asyncio.Lock()
+        # Serializes all inference on the single Llama instance, foreground
+        # callers first (Step 14).
+        self._gate = _PriorityGate()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -152,11 +205,24 @@ class LlamaRuntime:
 
     # -- inference ------------------------------------------------------------
 
+    def _release_after_abandoned(self, work: "asyncio.Future[Any]") -> None:
+        """Release the gate once an abandoned generation's thread finishes."""
+        self._gate.release()
+        if not work.cancelled() and work.exception() is not None:
+            logger.error("Abandoned generation failed: %s", work.exception())
+
     async def generate(
-        self, prompt: str, *, system: str | None = None, **overrides: Any
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        background: bool = False,
+        **overrides: Any,
     ) -> GenerationResult:
         """Run one chat completion; calls serialize, the event loop does not
-        block. ``overrides`` are per-call generation params (``max_tokens``,
+        block. ``background=True`` marks a background-agent call, which yields
+        the next turn to any waiting foreground caller (see module docstring).
+        ``overrides`` are per-call generation params (``max_tokens``,
         ``temperature``, ...) layered over the configured defaults."""
         if not self.loaded:
             raise RuntimeError("LlamaRuntime.generate() called before load()")
@@ -166,12 +232,28 @@ class LlamaRuntime:
         messages.append({"role": "user", "content": prompt})
         params = {**self._defaults, **overrides}
 
-        async with self._lock:
-            started = time.perf_counter()
-            completion = await asyncio.to_thread(
+        await self._gate.acquire(background=background)
+        started = time.perf_counter()
+        work = asyncio.ensure_future(
+            asyncio.to_thread(
                 self._llama.create_chat_completion, messages=messages, **params
             )
-            duration_ms = (time.perf_counter() - started) * 1000
+        )
+        try:
+            completion = await asyncio.shield(work)
+        except asyncio.CancelledError:
+            # The caller was cancelled (e.g. a background agent), but the
+            # inference thread cannot be interrupted: keep the gate held
+            # until it actually finishes, so no other call ever enters
+            # llama.cpp concurrently.
+            work.add_done_callback(self._release_after_abandoned)
+            raise
+        except BaseException:
+            self._gate.release()
+            raise
+        else:
+            self._gate.release()
+        duration_ms = (time.perf_counter() - started) * 1000
 
         choice = completion["choices"][0]
         usage = completion.get("usage") or {}
