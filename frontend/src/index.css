@@ -1,0 +1,243 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --border: #d8dce2;
+  --text: #1b1f27;
+  --muted: #667085;
+  --accent: #2f5fd0;
+  --accent-soft: #e4ebfa;
+  --error: #b3261e;
+  --error-soft: #fdecea;
+  --ok: #1d7a46;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161b;
+    --surface: #1e2128;
+    --border: #343945;
+    --text: #e7e9ee;
+    --muted: #9aa2b1;
+    --accent: #7ea1f0;
+    --accent-soft: #26324d;
+    --error: #f2857c;
+    --error-soft: #3d2323;
+    --ok: #5dc389;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#root {
+  height: 100vh;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.app-header h1 {
+  margin: 0.75rem 0;
+  font-size: 1.25rem;
+}
+
+/* Chat */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.message-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+.message-list-empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.message {
+  max-width: 85%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+}
+
+.message-user {
+  align-self: flex-end;
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.message-assistant {
+  align-self: flex-start;
+  background: var(--bg);
+}
+
+.message-author {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.15rem;
+}
+
+.message-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-pending .message-text {
+  color: var(--muted);
+}
+
+.message-failed {
+  border-color: var(--error);
+}
+
+.message-assistant.message-failed {
+  background: var(--error-soft);
+}
+
+.message-error {
+  margin-top: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 0.35rem;
+  background: var(--error-soft);
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
+.pending-dots::after {
+  content: "…";
+  animation: pending-pulse 1.2s infinite;
+}
+
+@keyframes pending-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Prompt input */
+
+.prompt-input {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.prompt-input textarea {
+  flex: 1;
+  resize: none;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+.prompt-input textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.prompt-input button {
+  padding: 0 1.25rem;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+
+.prompt-input button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Status bar */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0 0.75rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status-connected .status-dot {
+  background: var(--ok);
+}
+
+.status-unreachable .status-dot {
+  background: var(--error);
+}
+
+.status-live {
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.live-live {
+  color: var(--ok);
+}
+
+.live-polling {
+  color: var(--accent);
+}
+
+.live-disconnected {
+  color: var(--error);
+}
+
+.status-session {
+  margin-left: auto;
+  font-family: ui-monospace, Consolas, monospace;
+}

@@ -431,6 +431,14 @@ class StateStore:
             if run_id in self._runs
         )
 
+    def list_sessions(self) -> tuple[SessionSnapshot, ...]:
+        """Snapshots of every known session."""
+        return tuple(record.snapshot() for record in self._sessions.values())
+
+    def list_runs(self) -> tuple[RunSnapshot, ...]:
+        """Snapshots of every retained run (in-flight and recently finished)."""
+        return tuple(record.snapshot() for record in self._runs.values())
+
     def list_agents(self) -> tuple[AgentSnapshot, ...]:
         """Snapshots of all registered agents (empty until Step 14)."""
         return tuple(record.snapshot() for record in self._agents.values())

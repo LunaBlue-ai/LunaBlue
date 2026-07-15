@@ -12,6 +12,7 @@ from app.governance.policy import PolicyEngine
 from app.llm.runtime import LlamaRuntime
 from app.main import create_app
 from app.orchestration.pipeline import PromptPipeline
+from app.state.events import EventBus
 from app.state.store import StateStore
 
 
@@ -134,10 +135,13 @@ def make_app(
     intake = PromptIntake(PolicyEngine(strict_mode=strict))
     if store is None:
         store = StateStore(max_finished_runs=64)
+    event_bus = EventBus()
+    store.set_notify(event_bus.publish)
     app.state.audit_service = audit
     app.state.prompt_intake = intake
     app.state.llm_runtime = runtime
     app.state.state_store = store
+    app.state.event_bus = event_bus
     app.state.prompt_pipeline = PromptPipeline(
         intake=intake,
         runtime=runtime,

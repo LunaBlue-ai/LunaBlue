@@ -1,12 +1,16 @@
 """Application factory for the LunaBlue backend."""
 
 import logging
+import mimetypes
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app import __version__
+from app.api import websocket
 from app.api.routes import api_router
 from app.audit import db
 from app.audit.service import AuditService
@@ -15,9 +19,20 @@ from app.governance.intake import PromptIntake
 from app.governance.policy import PolicyEngine
 from app.llm.runtime import LlamaRuntime, ModelNotFoundError
 from app.orchestration.pipeline import PromptPipeline
+from app.state.events import EventBus
 from app.state.store import StateStore
 
 logger = logging.getLogger(__name__)
+
+# Where scripts/build_frontend places the built React bundle.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Windows machines sometimes carry registry MIME mappings that mark .js as
+# text/plain, which makes browsers refuse Vite's module scripts. Pin the
+# types the bundle relies on so serving works identically everywhere.
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
 
 
 @asynccontextmanager
@@ -68,6 +83,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # — nothing to tear down on shutdown.
     state_store = StateStore(max_finished_runs=settings.state_max_finished_runs)
     app.state.state_store = state_store
+    # Bridge store mutations to the /ws endpoint (docs/Architecture.md:
+    # events.py is the only path between them; the store stays WS-ignorant).
+    event_bus = EventBus()
+    state_store.set_notify(event_bus.publish)
+    app.state.event_bus = event_bus
     app.state.prompt_pipeline = PromptPipeline(
         intake=intake,
         runtime=runtime,
@@ -86,10 +106,77 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("LunaBlue backend shutting down")
 
 
-def create_app() -> FastAPI:
-    """Build a fresh application instance (tests create isolated copies)."""
+def _register_frontend(app: FastAPI, static_dir: Path) -> None:
+    """Serve the built React bundle from ``static_dir`` at the root path.
+
+    Registered after the ``/api`` router so API routing always wins: the
+    catch-all only sees requests no earlier route matched, and it still
+    answers unknown ``/api``/``/ws`` paths with a JSON 404 rather than the
+    SPA fallback.
+    """
+    root = static_dir.resolve()
+    index_file = root / "index.html"
+
+    # All methods, so an unknown /api path keeps its JSON 404 on POST etc.
+    # (a GET/HEAD-only route would turn those into bare 405s).
+    @app.api_route(
+        "/{path:path}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    async def serve_frontend(request: Request, path: str) -> Response:
+        if path in ("api", "ws") or path.startswith(("api/", "ws/")):
+            raise HTTPException(status_code=404, detail="Not Found")
+        if request.method not in ("GET", "HEAD"):
+            raise HTTPException(
+                status_code=405,
+                detail="Method Not Allowed",
+                headers={"Allow": "GET, HEAD"},
+            )
+        if not index_file.is_file():
+            # Dev mode: no bundle has been built yet. Point at the workflow
+            # instead of erroring.
+            return JSONResponse(
+                status_code=200 if path == "" else 404,
+                content={
+                    "detail": "Frontend bundle not built.",
+                    "hint": (
+                        "Run scripts/build_frontend to serve the UI from this "
+                        "process, or use the Vite dev server: "
+                        "cd frontend && npm run dev."
+                    ),
+                    "api": "/api/health",
+                },
+            )
+        if path:
+            candidate = (root / path).resolve()
+            if candidate.is_relative_to(root) and candidate.is_file():
+                # Vite content-hashes everything under assets/, so those are
+                # immutable; index.html and other root files must revalidate.
+                cache = (
+                    "public, max-age=31536000, immutable"
+                    if path.startswith("assets/")
+                    else "no-cache"
+                )
+                return FileResponse(candidate, headers={"Cache-Control": cache})
+        # Root, or an unknown path: SPA fallback for client-side routing.
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+
+
+def create_app(static_dir: Path | None = None) -> FastAPI:
+    """Build a fresh application instance (tests create isolated copies).
+
+    ``static_dir`` overrides where the built frontend is served from
+    (tests point it at fabricated bundles); production uses the packaged
+    ``app/static/`` directory.
+    """
     app = FastAPI(title="LunaBlue", version=__version__, lifespan=lifespan)
     app.include_router(api_router, prefix="/api")
+    # Live-state streaming at /ws (no /api prefix; the dev proxy and the SPA
+    # catch-all both reserve the bare path).
+    app.include_router(websocket.router)
+    # Must stay last: the SPA catch-all matches every path not claimed above.
+    _register_frontend(app, static_dir or _STATIC_DIR)
     return app
 
 
