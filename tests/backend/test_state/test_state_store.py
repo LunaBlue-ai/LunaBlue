@@ -273,3 +273,34 @@ async def test_a_failing_hook_never_breaks_mutations(store):
 
 async def test_agent_registry_starts_empty(store):
     assert store.list_agents() == ()
+
+
+async def test_settled_agents_are_evicted_beyond_the_retention_window():
+    tight = StateStore(max_finished_agents=1)
+    events: list[StoreEvent] = []
+    tight.set_notify(events.append)
+
+    for i in (1, 2):
+        await tight.register_agent(f"agent-{i}", kind="research", task=f"t{i}")
+        await tight.update_agent(f"agent-{i}", state="running")
+        await tight.update_agent(f"agent-{i}", state="completed", last_result="ok")
+
+    # The oldest settled agent rolled out; the newest is retained.
+    assert tight.get_agent("agent-1") is None
+    assert [a.agent_id for a in tight.list_agents()] == ["agent-2"]
+    evicted = [e for e in events if e.kind == "agent_evicted"]
+    assert [e.snapshot.agent_id for e in evicted] == ["agent-1"]
+    assert evicted[0].snapshot.state == "completed"
+
+
+async def test_live_agents_are_never_evicted():
+    tight = StateStore(max_finished_agents=0)
+    await tight.register_agent("agent-1", kind="research", task="t1")
+    await tight.register_agent("agent-2", kind="research", task="t2")
+    await tight.update_agent("agent-2", state="running")
+
+    # Pending/running agents stay despite the zero retention window ...
+    assert {a.agent_id for a in tight.list_agents()} == {"agent-1", "agent-2"}
+    # ... and leave immediately once settled.
+    await tight.update_agent("agent-2", state="cancelled")
+    assert tight.get_agent("agent-2") is None

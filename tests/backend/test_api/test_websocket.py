@@ -3,7 +3,7 @@
 These use Starlette's sync TestClient as a context manager so HTTP requests
 and WebSocket sessions share one event loop (required: the EventBus queues
 are loop-bound). The real lifespan needs Postgres and a model file, so it is
-replaced with a no-op — the fakes wiring in :func:`tests.fakes.make_app`
+replaced with a no-op — the fakes wiring in :func:`tests.backend.fakes.make_app`
 already provides everything the routes read from ``app.state``.
 """
 
@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.config import get_settings
-from tests.fakes import FakeAuditService, make_app, make_runtime
+from tests.backend.fakes import FakeAuditService, make_app, make_runtime
 
 # The full happy-path run_updated phase progression, in order.
 _RUN_PHASES = [

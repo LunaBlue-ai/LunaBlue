@@ -1,10 +1,10 @@
 /**
  * Owns the live-updates channel (Step 13): a `/ws` socket (src/api/ws.ts)
- * dispatching run events into app state, plus the polling fallback from
- * docs/Components/WEB.md — while the socket is down and a prompt is in
- * flight, run status is polled over HTTP instead, and the socket's automatic
- * reconnect switches back to live updates (resyncing from the connect-time
- * `snapshot` message).
+ * dispatching run and agent events into app state, plus the polling fallback
+ * from docs/Components/WEB.md — while the socket is down, run status is
+ * polled over HTTP for in-flight prompts and `GET /api/agents` for the agent
+ * registry (Step 15), and the socket's automatic reconnect switches back to
+ * live updates (resyncing from the connect-time `snapshot` message).
  *
  * Polling detail: `POST /api/prompt` is synchronous, so a pending prompt has
  * no request id until it finishes. Until a run event claims one, the poller
@@ -14,9 +14,10 @@
  */
 
 import { useEffect, useRef } from "react";
-import { ApiError, getRun, getSession } from "../api/client";
+import { ApiError, getRun, getSession, listAgents } from "../api/client";
 import { openLiveSocket, type ServerMessage } from "../api/ws";
 import {
+  isActiveAgent,
   isTerminalPhase,
   useAppDispatch,
   useAppState,
@@ -32,7 +33,7 @@ function isPendingPrompt(message: ChatMessage): boolean {
 
 export function useWebSocket(): void {
   const dispatch = useAppDispatch();
-  const { wsStatus, sessionId, messages } = useAppState();
+  const { wsStatus, sessionId, messages, agents } = useAppState();
 
   // The socket lives for the app's lifetime; reconnect/backoff is internal.
   useEffect(() => {
@@ -42,17 +43,24 @@ export function useWebSocket(): void {
       onMessage: (message: ServerMessage) => {
         switch (message.type) {
           case "snapshot":
-            // Post-(re)connect resync: replay the live runs as updates.
+            // Post-(re)connect resync: replay the live runs as updates and
+            // replace the agent registry with the server's full list.
             for (const run of message.payload.runs) {
               dispatch({ type: "run_updated", run });
             }
+            dispatch({ type: "agents_synced", agents: message.payload.agents });
             break;
           case "run_updated":
             dispatch({ type: "run_updated", run: message.payload });
             break;
+          case "agent_updated":
+            dispatch({ type: "agent_updated", agent: message.payload });
+            break;
+          case "agent_evicted":
+            dispatch({ type: "agent_evicted", agentId: message.payload.agent_id });
+            break;
           default:
-            // session_updated / agent_updated / run_evicted: nothing in the
-            // UI consumes these yet (agents arrive in Step 15).
+            // session_updated / run_evicted: nothing in the UI consumes these.
             break;
         }
       },
@@ -124,4 +132,66 @@ export function useWebSocket(): void {
       window.clearInterval(timer);
     };
   }, [live, hasPendingPrompt, sessionId, dispatch]);
+
+  // One-shot registry sync on mount (Step 15): with WS disabled there is no
+  // connect snapshot, so a freshly loaded page would otherwise show an empty
+  // panel until the next prompt spawns an agent. Skipped when the socket
+  // opened first — its snapshot is newer.
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  useEffect(() => {
+    let cancelled = false;
+    listAgents()
+      .then((agentList) => {
+        if (!cancelled && !liveRef.current) {
+          dispatch({ type: "agents_synced", agents: agentList });
+        }
+      })
+      .catch(() => {
+        // The health probe and pollers own connectivity signaling.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dispatch]);
+
+  // Agent polling fallback (Step 15), same degradation strategy: while the
+  // socket is down, resync the registry whenever agents could be changing —
+  // a prompt in flight may spawn one (agents register mid-run, before the
+  // synchronous POST returns), and known active agents keep progressing
+  // after the prompt completes. Each poll replaces the registry, so the
+  // final tick after the last agent settles also stops the loop.
+  const hasActiveAgents = Object.values(agents).some(isActiveAgent);
+
+  useEffect(() => {
+    if (live || (!hasPendingPrompt && !hasActiveAgents)) {
+      return undefined;
+    }
+    let cancelled = false;
+    let inFlight = false;
+
+    const poll = async () => {
+      if (inFlight || cancelled) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const agentList = await listAgents();
+        if (!cancelled) {
+          dispatch({ type: "agents_synced", agents: agentList });
+        }
+      } catch {
+        // Connectivity signaling is the run poller's job; just retry.
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [live, hasPendingPrompt, hasActiveAgents, dispatch]);
 }

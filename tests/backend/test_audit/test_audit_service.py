@@ -1,8 +1,9 @@
 """Integration tests for the audit service.
 
-These run against the real Postgres from docker-compose (skipped when it is
-unreachable): they emit one of each event type and assert the rows land, and
-exercise the failure/overflow/shutdown policies from ``service.py``.
+These run against the docker-compose test Postgres via the ``audit_db``
+fixture (skipped with instructions when it is unreachable): they emit one of
+each event type and assert the rows land, and exercise the failure/overflow/
+shutdown policies from ``service.py``.
 """
 
 import asyncio
@@ -10,31 +11,11 @@ import logging
 import uuid
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from app.audit import db
 from app.audit.models import AgentEvent, PromptRequest, PromptResponse, Session
 from app.audit.service import AuditService
-from app.config import get_settings
-
-
-async def _postgres_available() -> bool:
-    try:
-        async with db.get_engine().connect():
-            return True
-    except Exception:
-        return False
-
-
-@pytest.fixture
-async def engine():
-    """Engine against the dev Postgres for this test's event loop."""
-    db.init_engine(get_settings().database_url)
-    if not await _postgres_available():
-        await db.dispose_engine()
-        pytest.skip("Postgres unavailable (start it with docker compose up)")
-    yield
-    await db.dispose_engine()
 
 
 @pytest.fixture
@@ -45,7 +26,7 @@ async def broken_engine():
     await db.dispose_engine()
 
 
-async def test_all_event_types_land_in_postgres(engine):
+async def test_all_event_types_land_in_postgres(audit_db):
     ids = uuid.uuid4().hex[:12]
     session_id, request_id, agent_id = f"s-{ids}", f"r-{ids}", f"a-{ids}"
 
@@ -110,15 +91,9 @@ async def test_all_event_types_land_in_postgres(engine):
             assert evt.payload == {"step": 1}
     finally:
         await service.close()
-        async with db.session_scope() as s:
-            await s.execute(delete(AgentEvent).where(AgentEvent.agent_id == agent_id))
-            await s.execute(
-                delete(PromptRequest).where(PromptRequest.request_id == request_id)
-            )
-            await s.execute(delete(Session).where(Session.session_id == session_id))
 
 
-async def test_session_reemit_upserts(engine):
+async def test_session_reemit_upserts(audit_db):
     session_id = f"s-{uuid.uuid4().hex[:12]}"
     service = AuditService()
     service.start()
@@ -131,25 +106,17 @@ async def test_session_reemit_upserts(engine):
             assert sess is not None and sess.user_id == "u-2"
     finally:
         await service.close()
-        async with db.session_scope() as s:
-            await s.execute(delete(Session).where(Session.session_id == session_id))
 
 
-async def test_close_drains_pending_events(engine):
+async def test_close_drains_pending_events(audit_db):
     """Events emitted just before shutdown are persisted by close()."""
     request_id = f"r-{uuid.uuid4().hex[:12]}"
     service = AuditService()
     service.start()
     service.record_prompt_request(request_id, "emitted right before shutdown")
     await service.close()
-    try:
-        async with db.session_scope() as s:
-            assert await s.get(PromptRequest, request_id) is not None
-    finally:
-        async with db.session_scope() as s:
-            await s.execute(
-                delete(PromptRequest).where(PromptRequest.request_id == request_id)
-            )
+    async with db.session_scope() as s:
+        assert await s.get(PromptRequest, request_id) is not None
 
 
 async def test_record_is_nonblocking_and_failures_stay_off_request_path(

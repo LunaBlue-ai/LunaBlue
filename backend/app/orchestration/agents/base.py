@@ -71,6 +71,21 @@ ProgressReporter = Callable[..., Awaitable[None]]
 AuditEmitter = Callable[..., None]
 
 
+class AgentStepLimitError(RuntimeError):
+    """The agent exceeded its configured LLM-call budget (Step 17).
+
+    Raised by :meth:`AgentContext.generate` before the over-budget call ever
+    reaches the runtime; the runner settles the agent as ``failed`` with this
+    summary, audited like any other failure.
+    """
+
+    def __init__(self, max_steps: int) -> None:
+        super().__init__(
+            f"Agent exceeded its step limit ({max_steps} LLM calls)"
+        )
+        self.max_steps = max_steps
+
+
 class AgentContext:
     """Everything one agent execution may touch, injected by the runner."""
 
@@ -82,18 +97,32 @@ class AgentContext:
         store: StateStore,
         report_progress: ProgressReporter,
         emit_audit: AuditEmitter,
+        max_steps: int = 0,
     ) -> None:
         self.spec = spec
         self.store = store  # read handles (snapshots); mutations are the runner's
         self._runtime = runtime
         self._report_progress = report_progress
         self._emit_audit = emit_audit
+        # Runaway guard (Step 17): LLM calls allowed for this execution;
+        # 0 means unlimited.
+        self._max_steps = max_steps
+        self._steps = 0
+
+    @property
+    def steps(self) -> int:
+        """LLM calls made so far by this execution."""
+        return self._steps
 
     async def generate(
         self, prompt: str, *, system: str | None = None, **overrides: Any
     ) -> GenerationResult:
         """One LLM call on the single shared runtime, at background priority:
-        foreground (main-graph) generations always get the next turn first."""
+        foreground (main-graph) generations always get the next turn first.
+        Counts against the agent's step limit when one is configured."""
+        self._steps += 1
+        if self._max_steps and self._steps > self._max_steps:
+            raise AgentStepLimitError(self._max_steps)
         return await self._runtime.generate(
             prompt, system=system, background=True, **overrides
         )

@@ -30,7 +30,7 @@ import logging
 from typing import Any, Mapping
 
 from app.audit.service import AuditService
-from app.llm.runtime import LlamaRuntime
+from app.llm.runtime import GenerationTimeoutError, LlamaRuntime
 from app.orchestration.agents import BUILTIN_AGENT_TYPES
 from app.orchestration.agents.base import (
     AgentContext,
@@ -58,12 +58,18 @@ class AgentRunner:
         store: StateStore,
         audit: AuditService,
         workers: int = 1,
+        timeout_seconds: float = 0.0,
+        max_steps: int = 0,
         agent_types: Mapping[str, type[BackgroundAgent]] | None = None,
     ) -> None:
         self._runtime = runtime
         self._store = store
         self._audit = audit
         self._worker_count = max(1, workers)
+        # Runaway guards (Step 17): per-agent wall-clock budget and LLM-call
+        # budget; 0 disables each.
+        self._timeout_seconds = timeout_seconds
+        self._max_steps = max_steps
         self._agent_types = dict(
             BUILTIN_AGENT_TYPES if agent_types is None else agent_types
         )
@@ -129,6 +135,16 @@ class AgentRunner:
         return True
 
     # -- lifecycle ---------------------------------------------------------------
+
+    @property
+    def alive(self) -> bool:
+        """True while the runner can execute agents: started, not shut down,
+        and at least one worker task still running (readiness reports this)."""
+        return (
+            not self._closed
+            and bool(self._workers)
+            and any(not worker.done() for worker in self._workers)
+        )
 
     def start(self) -> None:
         """Start the worker tasks; called from lifespan startup."""
@@ -214,9 +230,50 @@ class AgentRunner:
             store=self._store,
             report_progress=self._progress_reporter(spec),
             emit_audit=self._audit_emitter(spec),
+            max_steps=self._max_steps,
         )
         try:
-            result = await agent.run(context)
+            if self._timeout_seconds > 0:
+                result = await asyncio.wait_for(
+                    agent.run(context), self._timeout_seconds
+                )
+            else:
+                result = await agent.run(context)
+        except GenerationTimeoutError as exc:
+            # A single LLM call inside the agent hit the runtime's per-call
+            # guard: that is a generation failure, not a runaway agent.
+            # (Checked first — it subclasses asyncio.TimeoutError.)
+            summary = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "Agent %s (%s) failed: %s", spec.agent_id, spec.kind, summary
+            )
+            await self._settle(
+                spec.agent_id,
+                "failed",
+                request_id=spec.request_id,
+                error=summary,
+                payload={"error": summary, "reason": "generation timeout"},
+            )
+        except asyncio.TimeoutError:
+            # Runaway guard (Step 17): wait_for already cancelled the agent's
+            # coroutine; settle it as cancelled with the reason on record.
+            summary = (
+                f"Cancelled: exceeded the agent wall-clock timeout "
+                f"({self._timeout_seconds:.1f}s)"
+            )
+            logger.error(
+                "Agent %s (%s): %s", spec.agent_id, spec.kind, summary
+            )
+            await self._settle(
+                spec.agent_id,
+                "cancelled",
+                request_id=spec.request_id,
+                error=summary,
+                payload={
+                    "reason": "wall-clock timeout",
+                    "timeout_seconds": self._timeout_seconds,
+                },
+            )
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._settle(

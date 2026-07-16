@@ -83,6 +83,32 @@ class _PriorityGate:
                     return
         self._locked = False
 
+    @property
+    def depth(self) -> int:
+        """Callers currently holding or waiting for the lock."""
+        return (
+            (1 if self._locked else 0)
+            + len(self._foreground)
+            + len(self._background)
+        )
+
+
+class GenerationTimeoutError(asyncio.TimeoutError):
+    """One generation exceeded its configured wall-clock timeout (Step 17).
+
+    Subclasses :class:`asyncio.TimeoutError` so existing timeout handling
+    (the pipeline's graph-level guard) classifies it identically. The
+    abandoned inference thread keeps the runtime lock until it actually
+    finishes, so no other call ever enters llama.cpp concurrently.
+    """
+
+    def __init__(self, timeout_seconds: float) -> None:
+        super().__init__(
+            f"Generation exceeded the configured timeout "
+            f"({timeout_seconds:.1f}s)"
+        )
+        self.timeout_seconds = timeout_seconds
+
 
 class ModelNotFoundError(RuntimeError):
     """The configured GGUF model file does not exist."""
@@ -135,6 +161,7 @@ class LlamaRuntime:
         gpu_layers: int = 0,
         max_tokens: int = 512,
         temperature: float = 0.7,
+        generation_timeout_seconds: float = 0.0,
         llama_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._model_path = model_path
@@ -144,9 +171,17 @@ class LlamaRuntime:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        # Per-call wall-clock guard (Step 17); 0 disables it.
+        self._generation_timeout = generation_timeout_seconds
         self._llama_factory = llama_factory
         self._llama: Any = None
         self._model_id = Path(model_path).name
+        # Health flag (Step 17): cleared when the model itself raises (a
+        # llama.cpp crash), restored by the next successful generation.
+        # Readiness reports it; generate() still accepts calls so the runtime
+        # self-heals when the crash was transient.
+        self._healthy = True
+        self._last_error: str | None = None
         # Serializes all inference on the single Llama instance, foreground
         # callers first (Step 14).
         self._gate = _PriorityGate()
@@ -170,6 +205,8 @@ class LlamaRuntime:
             n_gpu_layers=self._gpu_layers,
             verbose=False,
         )
+        self._healthy = True
+        self._last_error = None
         logger.info(
             "Model loaded: %s (context_size=%d, gpu_layers=%d, "
             "max_tokens=%d, temperature=%.2f) in %.1fs",
@@ -194,6 +231,23 @@ class LlamaRuntime:
         return self._llama is not None
 
     @property
+    def healthy(self) -> bool:
+        """False after the model itself raised (llama.cpp crash) until a
+        generation succeeds again; readiness reports the distinction."""
+        return self.loaded and self._healthy
+
+    @property
+    def last_error(self) -> str | None:
+        """Summary of the crash that marked the runtime unhealthy, if any."""
+        return self._last_error
+
+    @property
+    def queue_depth(self) -> int:
+        """Generations in flight or queued (both priority classes); the
+        busy guard compares this against ``LLM_MAX_QUEUE_DEPTH``."""
+        return self._gate.depth
+
+    @property
     def model_info(self) -> dict[str, Any]:
         return {
             "model_id": self._model_id,
@@ -201,6 +255,7 @@ class LlamaRuntime:
             "context_size": self._context_size,
             "gpu_layers": self._gpu_layers,
             "loaded": self.loaded,
+            "healthy": self.healthy,
         }
 
     # -- inference ------------------------------------------------------------
@@ -209,7 +264,17 @@ class LlamaRuntime:
         """Release the gate once an abandoned generation's thread finishes."""
         self._gate.release()
         if not work.cancelled() and work.exception() is not None:
+            # The abandoned call crashed inside llama.cpp: that is a model
+            # crash even though no caller is left to observe it.
+            self._mark_unhealthy(work.exception())
             logger.error("Abandoned generation failed: %s", work.exception())
+
+    def _mark_unhealthy(self, exc: BaseException | None) -> None:
+        self._healthy = False
+        self._last_error = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "Model runtime marked unhealthy after crash: %s", self._last_error
+        )
 
     async def generate(
         self,
@@ -240,7 +305,18 @@ class LlamaRuntime:
             )
         )
         try:
-            completion = await asyncio.shield(work)
+            if self._generation_timeout > 0:
+                completion = await asyncio.wait_for(
+                    asyncio.shield(work), self._generation_timeout
+                )
+            else:
+                completion = await asyncio.shield(work)
+        except asyncio.TimeoutError:
+            # Per-call guard (Step 17): the inference thread cannot be
+            # interrupted, so the gate stays held until it actually finishes
+            # (later calls queue behind it) and the caller fails cleanly now.
+            work.add_done_callback(self._release_after_abandoned)
+            raise GenerationTimeoutError(self._generation_timeout) from None
         except asyncio.CancelledError:
             # The caller was cancelled (e.g. a background agent), but the
             # inference thread cannot be interrupted: keep the gate held
@@ -248,11 +324,16 @@ class LlamaRuntime:
             # llama.cpp concurrently.
             work.add_done_callback(self._release_after_abandoned)
             raise
-        except BaseException:
+        except BaseException as exc:
             self._gate.release()
+            # The model itself raised (llama.cpp crash): flag it for
+            # readiness; in-flight work fails cleanly via this raise.
+            self._mark_unhealthy(exc)
             raise
         else:
             self._gate.release()
+            self._healthy = True
+            self._last_error = None
         duration_ms = (time.perf_counter() - started) * 1000
 
         choice = completion["choices"][0]

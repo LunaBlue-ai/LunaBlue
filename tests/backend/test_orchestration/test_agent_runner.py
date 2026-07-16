@@ -16,8 +16,8 @@ from app.orchestration.agents.base import (
 from app.orchestration.agents.research import parse_sub_questions
 from app.orchestration.graph import build_main_graph
 from app.orchestration.runner import AgentRunner
-from app.state.store import StateStore, StoreEvent
-from tests.fakes import FakeAuditService, make_runtime
+from app.state.store import StateStore
+from tests.backend.fakes import FakeAuditService, make_runtime
 
 
 async def wait_until(predicate, timeout: float = 2.0) -> None:

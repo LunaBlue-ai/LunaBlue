@@ -16,6 +16,28 @@ services:
       timeout: 5s
       retries: 10
 
+  # Throwaway Postgres for the test suite (Step 16): fixed credentials, a
+  # non-default port so it never collides with the dev database above, and
+  # tmpfs storage so every start is a clean slate. Not started by default:
+  #   docker compose --profile test up -d postgres-test
+  postgres-test:
+    image: postgres:16
+    container_name: lunablue-postgres-test
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: lunablue_test
+      POSTGRES_PASSWORD: lunablue_test
+      POSTGRES_DB: lunablue_test
+    ports:
+      - "55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lunablue_test -d lunablue_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
   # Optional: pgAdmin for browsing the audit schema during development.
   # Uncomment and add PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD to .env.
   # pgadmin:

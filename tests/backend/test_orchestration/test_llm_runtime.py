@@ -1,7 +1,7 @@
 """Tests for the LLM runtime (Step 7).
 
 All tests run against a fake ``Llama`` class injected via ``llama_factory``
-(see ``tests.fakes``), so the suite needs neither a model file nor the
+(see ``tests.backend.fakes``), so the suite needs neither a model file nor the
 ``llama-cpp-python`` package.
 """
 
@@ -19,7 +19,7 @@ from app.llm.runtime import (
     load_system_prompt,
 )
 from app.main import create_app
-from tests.fakes import FakeAuditService, FakeLlama, make_app, make_runtime
+from tests.backend.fakes import FakeAuditService, FakeLlama, make_app, make_runtime
 
 
 def test_missing_model_file_fails_fast_with_actionable_error(tmp_path):

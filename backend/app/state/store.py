@@ -3,8 +3,9 @@ runtime state (Step 10).
 
 :class:`StateStore` tracks active sessions, in-flight prompt runs, and (from
 Step 14) background agents with their task queues. It is *live* state only:
-completed and failed runs are retained for a bounded window and then evicted —
-the Postgres audit chain is the durable record (docs/Architecture.md).
+finished runs and settled agents are retained for a bounded window and then
+evicted — the Postgres audit chain is the durable record
+(docs/Architecture.md).
 
 Concurrency model: mutations are async methods serialized by one
 ``asyncio.Lock``; every mutation body is fully synchronous once inside the
@@ -129,8 +130,9 @@ class StoreEvent:
     """What the notify hook receives on every mutation.
 
     ``kind`` is one of ``run_updated`` (created, phase change, or terminal),
-    ``run_evicted``, ``session_updated``, or ``agent_updated`` (Step 14);
-    ``snapshot`` is the post-mutation view of the affected entity.
+    ``run_evicted``, ``session_updated``, ``agent_updated`` (Step 14), or
+    ``agent_evicted`` (Step 15 — a settled agent rolled out of the retention
+    window); ``snapshot`` is the post-mutation view of the affected entity.
     """
 
     kind: str
@@ -269,6 +271,7 @@ class StateStore:
         self,
         *,
         max_finished_runs: int = 256,
+        max_finished_agents: int = 256,
         notify: StoreNotifyHook | None = None,
     ) -> None:
         self._lock = asyncio.Lock()
@@ -279,6 +282,11 @@ class StateStore:
         # left end once the cap is exceeded. In-flight runs are never evicted.
         self._finished: deque[str] = deque()
         self._max_finished_runs = max(0, max_finished_runs)
+        # Same retention model for settled agents (Step 15): live/pending
+        # agents are never evicted, and the full history survives in the
+        # agent_events audit record.
+        self._finished_agents: deque[str] = deque()
+        self._max_finished_agents = max(0, max_finished_agents)
         self._notify_hook = notify
 
     # -- notify point (Step 13 attaches here) ------------------------------------
@@ -449,7 +457,10 @@ class StateStore:
                 record.error = error
             record.updated_at = _utcnow()
             snapshot = record.snapshot()
-        self._emit([StoreEvent("agent_updated", snapshot)])
+            events = [StoreEvent("agent_updated", snapshot)]
+            if record.terminal:
+                events.extend(self._evict_finished_agents(record.agent_id))
+        self._emit(events)
         return snapshot
 
     async def _finish_run(
@@ -488,6 +499,21 @@ class StateStore:
             if session is not None and victim_id in session.run_ids:
                 session.run_ids.remove(victim_id)
             events.append(StoreEvent("run_evicted", victim.snapshot()))
+        return events
+
+    def _evict_finished_agents(self, agent_id: str) -> list[StoreEvent]:
+        """Roll the settled-agent retention window forward. Caller holds the
+        lock. Evicted agents remain fully reconstructable from the
+        ``agent_events`` audit record (api/routes/agents.py does exactly
+        that)."""
+        self._finished_agents.append(agent_id)
+        events: list[StoreEvent] = []
+        while len(self._finished_agents) > self._max_finished_agents:
+            victim_id = self._finished_agents.popleft()
+            victim = self._agents.pop(victim_id, None)
+            if victim is None:  # pragma: no cover - defensive
+                continue
+            events.append(StoreEvent("agent_evicted", victim.snapshot()))
         return events
 
     def _upsert_session(

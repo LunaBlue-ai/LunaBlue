@@ -36,7 +36,7 @@ from fastapi import Request
 
 from app.audit.service import AuditService
 from app.governance.intake import IntakeContext, PromptIntake, PromptRejectedError
-from app.llm.runtime import LlamaRuntime
+from app.llm.runtime import GenerationTimeoutError, LlamaRuntime
 from app.orchestration.graph import MainGraphState, build_main_graph
 from app.orchestration.runner import AgentRunner
 from app.state.store import StateStore
@@ -71,6 +71,8 @@ class GenerationFailedError(Exception):
     Raised only after the failure has been audited. Carries the identifiers
     the route needs to build the ``status="failed"`` response body; ``summary``
     is the internal error description (already audited — not for clients).
+    ``timeout`` distinguishes the error-taxonomy code (``generation_timeout``
+    vs ``generation_failed``, Step 17).
     """
 
     def __init__(
@@ -80,12 +82,31 @@ class GenerationFailedError(Exception):
         request_id: str,
         session_id: str,
         created_at: datetime,
+        timeout: bool = False,
     ) -> None:
         super().__init__(summary)
         self.summary = summary
         self.request_id = request_id
         self.session_id = session_id
         self.created_at = created_at
+        self.timeout = timeout
+
+
+class ServiceBusyError(Exception):
+    """The generation queue is over its configured backlog (Step 17).
+
+    Raised before the request is registered anywhere — no run, no session,
+    no audit rows — so the client's fast 503 is genuinely free and a retry
+    starts from a clean slate.
+    """
+
+    def __init__(self, queue_depth: int, max_queue_depth: int) -> None:
+        super().__init__(
+            f"Generation queue is full ({queue_depth} in flight or queued, "
+            f"limit {max_queue_depth}); try again shortly"
+        )
+        self.queue_depth = queue_depth
+        self.max_queue_depth = max_queue_depth
 
 
 def _log_abandoned_run(task: asyncio.Task) -> None:
@@ -112,12 +133,16 @@ class PromptPipeline:
         store: StateStore,
         timeout_seconds: float,
         runner: AgentRunner | None = None,
+        max_queue_depth: int = 0,
     ) -> None:
         self._intake = intake
         self._runtime = runtime
         self._audit = audit
         self._store = store
         self._timeout_seconds = timeout_seconds
+        # Busy guard (Step 17): reject new prompts when this many generations
+        # are already in flight or queued; 0 disables the guard.
+        self._max_queue_depth = max_queue_depth
         # Compiled once per process (the lifespan builds one pipeline); the
         # store bound here makes each node entry advance the run's phase, and
         # the runner (Step 14) enables the agent-spawn detour.
@@ -132,6 +157,15 @@ class PromptPipeline:
         metadata: dict[str, Any] | None = None,
     ) -> PipelineResult:
         """Execute the full flow for one validated prompt."""
+        # Busy guard first (Step 17): a fast 503 before anything is
+        # registered beats unbounded queuing behind the single model.
+        if (
+            self._max_queue_depth
+            and self._runtime.queue_depth >= self._max_queue_depth
+        ):
+            raise ServiceBusyError(
+                self._runtime.queue_depth, self._max_queue_depth
+            )
         request_id = str(uuid.uuid4())
         session_id = session_id or str(uuid.uuid4())
         created_at = datetime.now(timezone.utc)
@@ -193,8 +227,13 @@ class PromptPipeline:
         except Exception as exc:
             duration_ms = (time.perf_counter() - started) * 1000
             if isinstance(exc, asyncio.TimeoutError):
+                # Either the graph-level budget here or the runtime's
+                # per-call guard (GenerationTimeoutError carries its own
+                # timeout in its message).
                 summary = (
-                    f"Generation timed out after {self._timeout_seconds:.1f}s"
+                    str(exc)
+                    if isinstance(exc, GenerationTimeoutError)
+                    else f"Generation timed out after {self._timeout_seconds:.1f}s"
                 )
                 logger.error("Request %s: %s", request_id, summary)
             else:
@@ -220,6 +259,7 @@ class PromptPipeline:
                 request_id=request_id,
                 session_id=session_id,
                 created_at=created_at,
+                timeout=isinstance(exc, asyncio.TimeoutError),
             ) from exc
 
         await self._store.complete_run(

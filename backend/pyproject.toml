@@ -16,15 +16,22 @@ dependencies = [
     "asyncpg",
     "alembic",
     "greenlet",
-    "llama-cpp-python",
     "langgraph",
 ]
 
 [project.optional-dependencies]
+# The real llama.cpp runtime. Optional so tests and CI install everything
+# they need without compiling llama-cpp-python or downloading a model —
+# the suite runs against tests/backend/fakes.FakeLlamaRuntime instead.
+# Running the actual server requires: pip install -e backend[llm]
+llm = [
+    "llama-cpp-python",
+]
 dev = [
     "pytest",
     "pytest-asyncio",
     "httpx",
+    "ruff",
 ]
 
 [tool.setuptools.packages.find]
@@ -33,5 +40,5 @@ include = ["app*"]
 [tool.setuptools.package-data]
 app = ["llm/prompts/*.md"]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
+# pytest configuration lives in the repo-root pytest.ini (Step 16): the
+# consolidated suite under tests/backend is run from the repository root.

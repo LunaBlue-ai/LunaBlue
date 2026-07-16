@@ -11,8 +11,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app import __version__
 from app.api import websocket
+from app.api.errors import install_error_handling
 from app.api.routes import api_router
 from app.audit import db
+from app.audit.redaction import Redactor
 from app.audit.service import AuditService
 from app.config import get_settings
 from app.governance.intake import PromptIntake
@@ -20,6 +22,11 @@ from app.governance.policy import PolicyEngine
 from app.llm.runtime import LlamaRuntime, ModelNotFoundError
 from app.orchestration.pipeline import PromptPipeline
 from app.orchestration.runner import AgentRunner
+from app.startup import (
+    StartupValidationError,
+    check_database_connects,
+    validate_settings,
+)
 from app.state.events import EventBus
 from app.state.store import StateStore
 
@@ -50,8 +57,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.host,
         settings.port,
     )
+    # Fail-fast startup validation (Step 17): every problem is collected and
+    # reported in one actionable message before anything is constructed.
+    problems, warnings = validate_settings(settings, static_dir=_STATIC_DIR)
+    if settings.startup_validate_db and not problems:
+        db_problem = await check_database_connects(settings.database_url)
+        if db_problem is not None:
+            problems.append(db_problem)
+    if problems:
+        error = StartupValidationError(problems)
+        logger.error("%s", error)
+        raise error
+    for warning in warnings:
+        logger.warning("%s", warning)
     db.init_engine(settings.database_url)
-    audit_service = AuditService()
+    redactor = (
+        Redactor(extra_patterns=settings.audit_redaction_patterns)
+        if settings.audit_redaction_enabled
+        else None
+    )
+    audit_service = AuditService(
+        settings.audit_max_queue_size,
+        redactor=redactor,
+        drop_log_interval=settings.audit_drop_log_interval_seconds,
+    )
     audit_service.start()
     app.state.audit_service = audit_service
     intake = PromptIntake(
@@ -68,6 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         gpu_layers=settings.llm_gpu_layers,
         max_tokens=settings.llm_max_tokens,
         temperature=settings.llm_temperature,
+        generation_timeout_seconds=settings.llm_generation_timeout_seconds,
     )
     try:
         runtime.load()
@@ -82,7 +112,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The shared in-memory state store: live sessions/runs, served by the
     # status APIs and streamed over WebSockets from Step 13. Purely in-memory
     # — nothing to tear down on shutdown.
-    state_store = StateStore(max_finished_runs=settings.state_max_finished_runs)
+    state_store = StateStore(
+        max_finished_runs=settings.state_max_finished_runs,
+        max_finished_agents=settings.state_max_finished_agents,
+    )
     app.state.state_store = state_store
     # Bridge store mutations to the /ws endpoint (docs/Architecture.md:
     # events.py is the only path between them; the store stays WS-ignorant).
@@ -96,6 +129,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store=state_store,
         audit=audit_service,
         workers=settings.agent_workers,
+        timeout_seconds=settings.agent_timeout_seconds,
+        max_steps=settings.agent_max_steps,
     )
     agent_runner.start()
     app.state.agent_runner = agent_runner
@@ -106,6 +141,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store=state_store,
         timeout_seconds=settings.llm_timeout_seconds,
         runner=agent_runner,
+        max_queue_depth=settings.llm_max_queue_depth,
     )
     try:
         yield
@@ -185,6 +221,9 @@ def create_app(static_dir: Path | None = None) -> FastAPI:
     ``app/static/`` directory.
     """
     app = FastAPI(title="LunaBlue", version=__version__, lifespan=lifespan)
+    # Request-id middleware plus the consistent error envelope (Step 17,
+    # api/errors.py): every non-2xx response carries code/message/request_id.
+    install_error_handling(app)
     app.include_router(api_router, prefix="/api")
     # Live-state streaming at /ws (no /api prefix; the dev proxy and the SPA
     # catch-all both reserve the bare path).

@@ -1,8 +1,10 @@
 /**
  * Frontend state: React context + reducer (no state library, per
  * docs/Components/WEB.md). Holds the session id, the chat message list,
- * backend connectivity, and (Step 13) live run progress + socket status.
- * Agent state joins in Step 15.
+ * backend connectivity, (Step 13) live run progress + socket status, and
+ * (Step 15) the agent registry mirrored from the backend store. The UI only
+ * renders this state — every agent fact originates in an `agent_updated`
+ * event, a snapshot, or an `/api/agents` poll; nothing is derived locally.
  */
 
 import {
@@ -13,7 +15,7 @@ import {
   type ReactNode,
 } from "react";
 import type { SocketStatus } from "../api/ws";
-import type { RunPhase, RunStatus } from "../types";
+import type { AgentState, AgentSummary, RunPhase, RunStatus } from "../types";
 
 /** Delivery status of one chat message. */
 export type MessageStatus = "pending" | "completed" | "failed";
@@ -34,6 +36,11 @@ export interface ChatMessage {
   livePhase?: RunPhase;
 }
 
+/** Model state, from `GET /api/health/ready`. `unhealthy` means loaded but
+ * the last generation crashed (Step 17); the runtime self-heals on the next
+ * successful generation. */
+export type ModelStatus = "unknown" | "loaded" | "not_loaded" | "unhealthy";
+
 export interface AppState {
   /**
    * Client-generated session id, sent with every prompt (the backend upserts
@@ -47,6 +54,14 @@ export interface AppState {
   connectivity: ConnectivityStatus;
   /** Live-socket status; drives the polling fallback and the indicator. */
   wsStatus: SocketStatus;
+  /** Agent registry mirrored from the backend store, keyed by agent id. */
+  agents: Record<string, AgentSummary>;
+  modelStatus: ModelStatus;
+  /**
+   * Names of readiness checks currently failing (Step 17): e.g. "database",
+   * "audit_queue". Empty while everything is ready (or unknown).
+   */
+  readinessIssues: string[];
 }
 
 export const initialAppState: AppState = {
@@ -54,12 +69,30 @@ export const initialAppState: AppState = {
   messages: [],
   connectivity: "unknown",
   wsStatus: "closed",
+  agents: {},
+  modelStatus: "unknown",
+  readinessIssues: [],
 };
 
 const TERMINAL_PHASES: ReadonlySet<string> = new Set(["completed", "failed"]);
 
 export function isTerminalPhase(phase: RunPhase): boolean {
   return TERMINAL_PHASES.has(phase);
+}
+
+const TERMINAL_AGENT_STATES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export function isTerminalAgentState(state: AgentState): boolean {
+  return TERMINAL_AGENT_STATES.has(state);
+}
+
+/** Agents still doing (or waiting to do) work — the StatusBar count. */
+export function isActiveAgent(agent: AgentSummary): boolean {
+  return !isTerminalAgentState(agent.state);
 }
 
 export type AppAction =
@@ -79,7 +112,19 @@ export type AppAction =
   | { type: "connectivity_changed"; connectivity: ConnectivityStatus }
   /** A run snapshot arrived (WebSocket event, snapshot resync, or poll). */
   | { type: "run_updated"; run: RunStatus }
-  | { type: "ws_status_changed"; wsStatus: SocketStatus };
+  | { type: "ws_status_changed"; wsStatus: SocketStatus }
+  /** One agent snapshot arrived (WebSocket `agent_updated`). */
+  | { type: "agent_updated"; agent: AgentSummary }
+  /** A settled agent left the backend's live-state retention window. */
+  | { type: "agent_evicted"; agentId: string }
+  /** Authoritative full agent list (connect snapshot or `/api/agents` poll). */
+  | { type: "agents_synced"; agents: AgentSummary[] }
+  | {
+      type: "model_status_changed";
+      modelStatus: ModelStatus;
+      /** Failing readiness check names; omitted means "unchanged". */
+      readinessIssues?: string[];
+    };
 
 function updateMessage(
   messages: ChatMessage[],
@@ -192,6 +237,47 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         connectivity:
           action.wsStatus === "open" ? "connected" : state.connectivity,
       };
+    case "agent_updated": {
+      const { agent } = action;
+      const existing = state.agents[agent.agent_id];
+      // Upserts are idempotent; a poll result racing a socket event must not
+      // roll an agent backwards, so older snapshots are dropped.
+      if (existing && existing.updated_at > agent.updated_at) {
+        return state;
+      }
+      return {
+        ...state,
+        agents: { ...state.agents, [agent.agent_id]: agent },
+      };
+    }
+    case "agent_evicted": {
+      if (!(action.agentId in state.agents)) {
+        return state;
+      }
+      const agents = { ...state.agents };
+      delete agents[action.agentId];
+      return { ...state, agents };
+    }
+    case "agents_synced": {
+      // Server truth replaces the registry wholesale: it also drops agents
+      // evicted while the socket was down.
+      const agents: Record<string, AgentSummary> = {};
+      for (const agent of action.agents) {
+        agents[agent.agent_id] = agent;
+      }
+      return { ...state, agents };
+    }
+    case "model_status_changed": {
+      const readinessIssues = action.readinessIssues ?? state.readinessIssues;
+      if (
+        state.modelStatus === action.modelStatus &&
+        readinessIssues.length === state.readinessIssues.length &&
+        readinessIssues.every((issue, i) => issue === state.readinessIssues[i])
+      ) {
+        return state;
+      }
+      return { ...state, modelStatus: action.modelStatus, readinessIssues };
+    }
   }
 }
 

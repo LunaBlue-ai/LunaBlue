@@ -9,14 +9,16 @@ internals for LangGraph execution without touching this module.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
+from app.api.errors import ApiError
 from app.api.schemas.prompt import PromptRequest, PromptResponse
 from app.governance.intake import PromptRejectedError
 from app.orchestration.pipeline import (
     GenerationFailedError,
     PromptPipeline,
+    ServiceBusyError,
     get_prompt_pipeline,
 )
 
@@ -44,17 +46,33 @@ _FAILED_RESPONSE_TEXT = (
         "422 and are not audited. Prompts rejected by governance policy "
         "return 400 with the reason and are audited with a rejected "
         "governance flag. If generation fails or times out, the response is "
-        "a 500 with `status=\"failed\"` and the failure is audited."
+        "a 500 with `status=\"failed\"` and the failure is audited. When the "
+        "generation queue is over its configured backlog, submission is "
+        "rejected immediately with a 503 (`code=\"busy\"`). Error responses "
+        "share the taxonomy envelope from `api/errors.py` (`code`, "
+        "`message`, `request_id`)."
     ),
     responses={
-        400: {"description": "Rejected by governance policy; detail carries the reason."},
+        400: {
+            "description": (
+                "Rejected by governance policy (`code=\"governance_rejected\"`); "
+                "the reason is in `message`."
+            )
+        },
         422: {"description": "Validation error: empty or oversized prompt."},
         500: {
             "model": PromptResponse,
             "description": (
                 "Generation failed or timed out; body carries "
-                '`status="failed"`.'
+                '`status="failed"` plus the error code '
+                '(`generation_timeout` or `generation_failed`).'
             ),
+        },
+        503: {
+            "description": (
+                "Generation queue over its configured backlog "
+                '(`code="busy"`); retry after a short delay.'
+            )
         },
     },
 )
@@ -69,8 +87,17 @@ async def submit_prompt(
             user_id=payload.user_id,
             metadata=payload.metadata,
         )
+    except ServiceBusyError as exc:
+        raise ApiError(
+            status_code=503,
+            code="busy",
+            message=str(exc),
+            headers={"Retry-After": "5"},
+        ) from exc
     except PromptRejectedError as exc:
-        raise HTTPException(status_code=400, detail=exc.reason) from exc
+        raise ApiError(
+            status_code=400, code="governance_rejected", message=exc.reason
+        ) from exc
     except GenerationFailedError as exc:
         failed = PromptResponse(
             request_id=exc.request_id,
@@ -79,7 +106,20 @@ async def submit_prompt(
             response_text=_FAILED_RESPONSE_TEXT,
             created_at=exc.created_at,
         )
-        return JSONResponse(status_code=500, content=failed.model_dump(mode="json"))
+        # The Step 5 wire contract (status="failed" body) extended with the
+        # Step 17 error envelope; request_id here is the run's id, which is
+        # what the audit trail is keyed on.
+        return JSONResponse(
+            status_code=500,
+            content={
+                **failed.model_dump(mode="json"),
+                "code": (
+                    "generation_timeout" if exc.timeout else "generation_failed"
+                ),
+                "message": _FAILED_RESPONSE_TEXT,
+                "detail": _FAILED_RESPONSE_TEXT,
+            },
+        )
 
     return PromptResponse(
         request_id=result.request_id,

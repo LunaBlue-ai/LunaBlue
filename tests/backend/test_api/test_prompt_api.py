@@ -16,14 +16,12 @@ from datetime import datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from app.api.schemas.prompt import MAX_PROMPT_LENGTH
 from app.audit import db
-from app.audit.models import PromptRequest, PromptResponse, Session
-from app.audit.service import AuditService
-from app.config import get_settings
-from tests.fakes import FakeAuditService, make_app, make_client, make_runtime
+from app.audit.models import PromptRequest, PromptResponse
+from tests.backend.fakes import FakeAuditService, make_app, make_client, make_runtime
 
 
 @pytest.fixture
@@ -316,80 +314,55 @@ async def test_openapi_documents_the_contract(client):
     }
 
 
-async def test_full_audit_chain_lands_in_postgres(tmp_path):
+async def test_full_audit_chain_lands_in_postgres(tmp_path, audit_service):
     """End-to-end: one POST writes the linked session, prompt_requests, and
-    prompt_responses rows."""
-    db.init_engine(get_settings().database_url)
-    try:
-        try:
-            async with db.get_engine().connect():
-                pass
-        except Exception:
-            pytest.skip("Postgres unavailable (start it with docker compose up)")
+    prompt_responses rows (to the docker-compose test database)."""
+    runtime, _ = make_runtime(tmp_path)
+    app = make_app(audit_service, runtime)
+    # Padded whitespace verifies the reviewed form lands normalized while
+    # the raw text is preserved untouched.
+    marker = f"integration {uuid.uuid4().hex[:8]}"
+    text = f"  {marker}   padded  "
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        resp = await c.post("/api/prompt", json={"text": text})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["response_text"] == f"echo: {marker} padded"
+    await audit_service.flush()
 
-        runtime, _ = make_runtime(tmp_path)
-        service = AuditService()
-        service.start()
-        app = make_app(service, runtime)
-        # Padded whitespace verifies the reviewed form lands normalized while
-        # the raw text is preserved untouched.
-        marker = f"integration {uuid.uuid4().hex[:8]}"
-        text = f"  {marker}   padded  "
-        try:
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://t") as c:
-                resp = await c.post("/api/prompt", json={"text": text})
-            assert resp.status_code == 200
-            body = resp.json()
-            assert body["response_text"] == f"echo: {marker} padded"
-            await service.flush()
+    async with db.session_scope() as s:
+        row = await s.get(PromptRequest, body["request_id"])
+        assert row is not None
+        assert row.raw_prompt == text  # raw form untouched
+        assert row.session_id == body["session_id"]
+        assert row.reviewed_prompt == f"{marker} padded"  # normalized
+        assert row.prompt_version == "1"
+        # Governance metadata lands as structured JSON.
+        assert row.governance["decision"] == "allowed"
+        assert isinstance(row.governance["tags"], list)
+        assert row.governance["directives"]
+        assert row.governance["rationale"]
+        assert row.timestamp.tzinfo is not None
 
-            async with db.session_scope() as s:
-                row = await s.get(PromptRequest, body["request_id"])
-                assert row is not None
-                assert row.raw_prompt == text  # raw form untouched
-                assert row.session_id == body["session_id"]
-                assert row.reviewed_prompt == f"{marker} padded"  # normalized
-                assert row.prompt_version == "1"
-                # Governance metadata lands as structured JSON.
-                assert row.governance["decision"] == "allowed"
-                assert isinstance(row.governance["tags"], list)
-                assert row.governance["directives"]
-                assert row.governance["rationale"]
-                assert row.timestamp.tzinfo is not None
-
-                # The linked response row completes the chain.
-                [response] = (
-                    await s.scalars(
-                        select(PromptResponse).where(
-                            PromptResponse.request_id == body["request_id"]
-                        )
-                    )
-                ).all()
-                assert response.llm_output == f"echo: {marker} padded"
-                assert response.final_output == response.llm_output
-                assert response.model_id == "model.gguf"
-                assert response.usage["total_tokens"] == 10
-                assert "duration_ms" in response.usage
-                # The graph's per-node decision metadata lands as JSON too.
-                assert [d["node"] for d in response.usage["decisions"]] == [
-                    "prompt_engineering",
-                    "llm_review",
-                    "respond",
-                ]
-                # Timestamps are consistent: response follows the request.
-                assert response.timestamp >= row.timestamp
-        finally:
-            await service.close()
-            async with db.session_scope() as s:
-                # prompt_responses rows cascade with their request.
-                await s.execute(
-                    delete(PromptRequest).where(PromptRequest.raw_prompt == text)
+        # The linked response row completes the chain.
+        [response] = (
+            await s.scalars(
+                select(PromptResponse).where(
+                    PromptResponse.request_id == body["request_id"]
                 )
-                await s.execute(
-                    delete(Session).where(
-                        Session.session_id == body["session_id"]
-                    )
-                )
-    finally:
-        await db.dispose_engine()
+            )
+        ).all()
+        assert response.llm_output == f"echo: {marker} padded"
+        assert response.final_output == response.llm_output
+        assert response.model_id == "model.gguf"
+        assert response.usage["total_tokens"] == 10
+        assert "duration_ms" in response.usage
+        # The graph's per-node decision metadata lands as JSON too.
+        assert [d["node"] for d in response.usage["decisions"]] == [
+            "prompt_engineering",
+            "llm_review",
+            "respond",
+        ]
+        # Timestamps are consistent: response follows the request.
+        assert response.timestamp >= row.timestamp

@@ -15,7 +15,7 @@ from app.orchestration.nodes.llm_review import (
 from app.orchestration.nodes.prompt_engineering import engineer_prompt
 from app.orchestration.nodes.respond import synthesize_response
 from app.state.store import StateStore
-from tests.fakes import make_runtime
+from tests.backend.fakes import make_runtime
 
 
 def make_governance(**overrides) -> GovernanceMetadata:

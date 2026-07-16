@@ -9,8 +9,12 @@ From the repository root:
 ```bash
 python -m venv backend/.venv
 backend/.venv/Scripts/activate      # Windows; on Unix: source backend/.venv/bin/activate
-pip install -e "backend[dev]"
+pip install -e "backend[dev,llm]"
 ```
+
+The `llm` extra pulls in `llama-cpp-python`, which the real server needs but
+tests never do (Step 16): `pip install -e "backend[dev]"` is enough to run
+`pytest` from the repo root.
 
 Configuration is read from environment variables and the repo-root `.env` (copy `.env.example` to `.env` and adjust). All settings are defined in [app/config.py](app/config.py).
 
@@ -25,7 +29,7 @@ scripts/download_model.sh      # Unix / macOS
 
 ### Install variants
 
-The default `pip install -e "backend[dev]"` builds **CPU-only** — correct and safe everywhere, no extra toolchain needed. To offload layers to a GPU (`LLM_GPU_LAYERS` > 0), reinstall `llama-cpp-python` with the matching backend enabled at build time:
+The default `pip install -e "backend[dev,llm]"` builds **CPU-only** — correct and safe everywhere, no extra toolchain needed. To offload layers to a GPU (`LLM_GPU_LAYERS` > 0), reinstall `llama-cpp-python` with the matching backend enabled at build time:
 
 ```bash
 # CUDA (NVIDIA)

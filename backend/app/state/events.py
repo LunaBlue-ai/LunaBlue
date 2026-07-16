@@ -8,10 +8,12 @@ anything about WebSockets.
 
 Delivery model: each subscriber gets its own bounded ``asyncio.Queue``.
 Publishing never blocks and never fails a mutation — when a slow consumer's
-queue is full, its oldest pending event is dropped with a logged warning.
-Dropped events are safe to lose because every payload is a full post-mutation
-snapshot, and the connect-time ``snapshot`` message (api/websocket.py) resyncs
-clients from scratch.
+queue is full, its oldest pending event is dropped with a logged warning and
+the subscription is marked *degraded* (Step 17): the WebSocket layer
+forwards that flag so the client knows events were lost and resyncs from a
+fresh snapshot. Dropped events are safe to lose because every payload is a
+full post-mutation snapshot, and the connect-time ``snapshot`` message
+(api/websocket.py) resyncs clients from scratch.
 
 Event types mirror :class:`~app.state.store.StoreEvent` kinds:
 
@@ -20,6 +22,8 @@ Event types mirror :class:`~app.state.store.StoreEvent` kinds:
 - ``run_evicted`` — a finished run rolled out of the retention window.
 - ``session_updated`` — a session was created or touched.
 - ``agent_updated`` — an agent changed (shape defined now, used in Step 14).
+- ``agent_evicted`` — a settled agent rolled out of the retention window
+  (Step 15).
 
 Every event carries a process-wide monotonic sequence number and a UTC
 timestamp, so consumers can order events and discard ones already reflected
@@ -60,7 +64,7 @@ class EventBus:
 
     def __init__(self, *, max_queue: int = 256) -> None:
         self._max_queue = max(1, max_queue)
-        self._queues: set[asyncio.Queue[BusEvent]] = set()
+        self._subscriptions: set["Subscription"] = set()
         self._seq = 0
 
     @property
@@ -70,14 +74,15 @@ class EventBus:
 
     @property
     def subscriber_count(self) -> int:
-        return len(self._queues)
+        return len(self._subscriptions)
 
     def publish(self, event: StoreEvent) -> None:
         """Stamp one store event and fan it out to every subscriber.
 
         Matches :data:`~app.state.store.StoreNotifyHook`, so the lifespan
         attaches this method directly via ``store.set_notify(bus.publish)``.
-        Never blocks: a full subscriber queue drops its oldest event instead.
+        Never blocks: a full subscriber queue drops its oldest event instead,
+        marking that subscription degraded so its consumer can resync.
         """
         self._seq += 1
         bus_event = BusEvent(
@@ -86,11 +91,13 @@ class EventBus:
             ts=datetime.now(timezone.utc),
             payload=event.snapshot,
         )
-        for queue in self._queues:
+        for subscription in self._subscriptions:
+            queue = subscription.queue
             try:
                 queue.put_nowait(bus_event)
             except asyncio.QueueFull:
                 dropped = queue.get_nowait()
+                subscription.mark_degraded()
                 logger.warning(
                     "Slow event subscriber: dropped %s (seq=%d) to enqueue seq=%d",
                     dropped.type,
@@ -109,9 +116,11 @@ class EventBus:
         drop the overlap). Callers must release the subscription with
         :meth:`Subscription.aclose` (e.g. via ``contextlib.aclosing``).
         """
-        queue: asyncio.Queue[BusEvent] = asyncio.Queue(self._max_queue)
-        self._queues.add(queue)
-        return Subscription(self._queues, queue)
+        subscription = Subscription(
+            self._subscriptions, asyncio.Queue(self._max_queue)
+        )
+        self._subscriptions.add(subscription)
+        return subscription
 
 
 class Subscription:
@@ -123,12 +132,32 @@ class Subscription:
 
     def __init__(
         self,
-        registry: set["asyncio.Queue[BusEvent]"],
+        registry: set["Subscription"],
         queue: "asyncio.Queue[BusEvent]",
     ) -> None:
         self._registry = registry
         self._queue = queue
         self._closed = False
+        self._degraded = False
+
+    @property
+    def queue(self) -> "asyncio.Queue[BusEvent]":
+        return self._queue
+
+    def mark_degraded(self) -> None:
+        """Called by the bus when this subscriber lost an event to overflow."""
+        self._degraded = True
+
+    @property
+    def degraded(self) -> bool:
+        """True if events were dropped since the last :meth:`consume_degraded`."""
+        return self._degraded
+
+    def consume_degraded(self) -> bool:
+        """Read-and-clear the degraded flag (the consumer tells its client
+        once, then the slate is clean until the next overflow)."""
+        was_degraded, self._degraded = self._degraded, False
+        return was_degraded
 
     def __aiter__(self) -> "Subscription":
         return self
@@ -141,4 +170,4 @@ class Subscription:
     async def aclose(self) -> None:
         """Unsubscribe: idempotent, safe at any point of the iteration."""
         self._closed = True
-        self._registry.discard(self._queue)
+        self._registry.discard(self)

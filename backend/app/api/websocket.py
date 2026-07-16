@@ -29,6 +29,19 @@ publication timestamp. Message types:
   ``SessionSummary``.
 - ``agent_updated`` — an agent changed; ``payload`` is an ``AgentStatus``
   (shape defined now, populated in Step 14).
+- ``agent_evicted`` — a settled agent left the live-state retention window
+  (Step 15); ``payload`` is its last ``AgentStatus``. Its durable record
+  stays queryable via ``GET /api/agents/{agent_id}``.
+- ``ping`` — heartbeat (Step 17), sent every ``WS_HEARTBEAT_SECONDS`` while
+  the stream is otherwise idle; carries no ``seq``/``payload``. Clients may
+  ignore it — its job is to make the server's send fail on dead connections
+  so they are reaped instead of leaking.
+
+Degraded delivery (Step 17): when a slow client's subscription overflowed
+(the bus dropped its oldest events), the next streamed event carries
+``"degraded": true``. Payloads are full snapshots, so nothing is corrupted —
+but state transitions may have been missed; the client should resync by
+reconnecting (the fresh connect-time ``snapshot`` restores consistency).
 
 The frontend mirror of this contract lives in ``frontend/src/api/ws.ts``.
 
@@ -61,6 +74,7 @@ _PAYLOAD_SCHEMAS: dict[str, type[BaseModel]] = {
     "run_evicted": RunStatus,
     "session_updated": SessionSummary,
     "agent_updated": AgentStatus,
+    "agent_evicted": AgentStatus,
 }
 
 
@@ -106,12 +120,15 @@ async def _stream_events(
 ) -> None:
     """Forward bus events to one client, skipping those the connect snapshot
     already covers (the subscription predates the snapshot, so the overlap is
-    exactly ``seq <= after_seq``)."""
+    exactly ``seq <= after_seq``). When the subscription overflowed, the next
+    delivered event carries ``degraded: true`` so the client can resync."""
     async for event in subscription:
         if event.seq <= after_seq:
             continue
         message = _serialize_event(event)
         if message is not None:
+            if subscription.consume_degraded():
+                message["degraded"] = True
             await websocket.send_json(message)
 
 
@@ -123,9 +140,23 @@ async def _receive_until_disconnect(websocket: WebSocket) -> None:
             return
 
 
+async def _heartbeat(websocket: WebSocket, interval: float) -> None:
+    """Send a ``ping`` message every ``interval`` seconds (Step 17).
+
+    A dead connection makes ``send_json`` raise, which ends this task and
+    triggers the endpoint's teardown — the reaping mechanism for clients
+    that vanished without a close frame."""
+    while True:
+        await asyncio.sleep(interval)
+        await websocket.send_json(
+            {"type": "ping", "ts": datetime.now(timezone.utc).isoformat()}
+        )
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    if not get_settings().ws_enabled:
+    settings = get_settings()
+    if not settings.ws_enabled:
         # Reject the handshake outright; the UI falls back to polling.
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -141,25 +172,35 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             await websocket.send_json(_snapshot_message(store, snapshot_seq))
         except (WebSocketDisconnect, RuntimeError):
             return  # client vanished during the handshake
-        sender = asyncio.create_task(
-            _stream_events(websocket, subscription, after_seq=snapshot_seq)
-        )
-        receiver = asyncio.create_task(_receive_until_disconnect(websocket))
-        try:
-            # Either the client disconnects (receiver returns / sender's send
-            # raises) or the sender fails; the other task is then cancelled so
-            # nothing leaks.
-            await asyncio.wait(
-                {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
+        tasks = {
+            asyncio.create_task(
+                _stream_events(websocket, subscription, after_seq=snapshot_seq)
+            ),
+            asyncio.create_task(_receive_until_disconnect(websocket)),
+        }
+        if settings.ws_heartbeat_seconds > 0:
+            tasks.add(
+                asyncio.create_task(
+                    _heartbeat(websocket, settings.ws_heartbeat_seconds)
+                )
             )
+        try:
+            # Either the client disconnects (receiver returns / a send
+            # raises) or a task fails; the others are then cancelled so
+            # nothing leaks.
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for task in (sender, receiver):
+            for task in tasks:
                 task.cancel()
-            results = await asyncio.gather(sender, receiver, return_exceptions=True)
-            for result in results:
-                if isinstance(result, (WebSocketDisconnect, asyncio.CancelledError)):
-                    continue
-                if isinstance(result, BaseException):
-                    logger.exception(
-                        "WebSocket client task failed", exc_info=result
-                    )
+            # Await each child directly rather than via asyncio.gather: when
+            # the server cancels this handler mid-teardown, gather can re-raise
+            # a child's bare CancelledError in place of the delivered one,
+            # which anyio's cancel scope (Starlette's TestClient, uvicorn) no
+            # longer recognizes as its own — surfacing teardown as an error.
+            for task in tasks:
+                try:
+                    await task
+                except (WebSocketDisconnect, asyncio.CancelledError):
+                    pass  # normal teardown; a pending outer cancel re-raises
+                except Exception:
+                    logger.exception("WebSocket client task failed")

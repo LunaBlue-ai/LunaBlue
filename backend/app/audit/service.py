@@ -13,28 +13,40 @@ Failure policy:
 - A failed batch is retried event-by-event so one bad row cannot take down
   the rest of the batch.
 - Overflow policy: the queue is bounded (``AuditService(max_queue_size=...)``).
-  When full, the *oldest* queued event is logged and dropped to make room for
-  the incoming one — under sustained backpressure the most recent events are
-  the ones worth keeping for live debugging.
+  When full, the *oldest* queued event is dropped to make room for the
+  incoming one — under sustained backpressure the most recent events are the
+  ones worth keeping for live debugging. Sustained overflow (e.g. a long
+  Postgres outage) is reported as one aggregate ERROR per
+  ``drop_log_interval`` seconds rather than per-event spam (Step 17); every
+  individual drop is still visible at DEBUG, and readiness surfaces the
+  saturation via :attr:`AuditService.saturated`.
+
+Redaction (Step 17): when a :class:`~app.audit.redaction.Redactor` is
+attached, prompt and output text fields are masked on the producer side —
+before the event is even enqueued — so unredacted text never sits in the
+queue or reaches Postgres.
 """
 
 import asyncio
 import dataclasses
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Request
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.audit import db, models
+from app.audit.redaction import Redactor
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_QUEUE_SIZE = 1000
 _BATCH_MAX = 100
+_DEFAULT_DROP_LOG_INTERVAL = 30.0
 
 # Sentinel telling the consumer to exit once everything ahead of it is drained.
 _STOP = object()
@@ -102,10 +114,48 @@ class AuditService:
     ``record_*`` methods, :meth:`close` on shutdown (drains the queue).
     """
 
-    def __init__(self, max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE) -> None:
+    def __init__(
+        self,
+        max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE,
+        *,
+        redactor: Redactor | None = None,
+        drop_log_interval: float = _DEFAULT_DROP_LOG_INTERVAL,
+    ) -> None:
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max_queue_size)
         self._consumer: asyncio.Task[None] | None = None
         self._closed = False
+        self._redactor = redactor
+        # Overflow accounting (Step 17): aggregate reporting plus the
+        # counters readiness exposes.
+        self._drop_log_interval = drop_log_interval
+        self._dropped_total = 0
+        self._dropped_since_log = 0
+        self._last_drop_log = 0.0
+
+    # -- introspection (readiness) --------------------------------------------
+
+    @property
+    def queue_depth(self) -> int:
+        """Events currently waiting to be written."""
+        return self._queue.qsize()
+
+    @property
+    def queue_capacity(self) -> int:
+        return self._queue.maxsize
+
+    @property
+    def dropped_total(self) -> int:
+        """Events dropped to overflow since the process started."""
+        return self._dropped_total
+
+    @property
+    def saturated(self) -> bool:
+        """True while the queue is full — the next event will drop the
+        oldest. Readiness reports this as an unhealthy audit pipeline."""
+        return self._queue.full()
+
+    def _redact(self, text: str | None) -> str | None:
+        return text if self._redactor is None else self._redactor.redact(text)
 
     # -- producer side (hot path) -------------------------------------------
 
@@ -134,10 +184,13 @@ class AuditService:
         self._enqueue(
             PromptRequestEvent(
                 request_id=request_id,
-                raw_prompt=raw_prompt,
+                # With redaction enabled the *redacted* text is what the
+                # raw_prompt column stores (see docs/DataRetention.md for
+                # the trade-off).
+                raw_prompt=self._redact(raw_prompt),
                 session_id=session_id,
                 user_id=user_id,
-                reviewed_prompt=reviewed_prompt,
+                reviewed_prompt=self._redact(reviewed_prompt),
                 prompt_version=prompt_version,
                 governance=governance,
             )
@@ -155,8 +208,8 @@ class AuditService:
         self._enqueue(
             PromptResponseEvent(
                 request_id=request_id,
-                llm_output=llm_output,
-                final_output=final_output,
+                llm_output=self._redact(llm_output),
+                final_output=self._redact(final_output),
                 model_id=model_id,
                 usage=usage,
             )
@@ -181,6 +234,40 @@ class AuditService:
             )
         )
 
+    # -- reads (Step 15: the agent detail API) --------------------------------
+
+    async def fetch_agent_events(
+        self, agent_id: str, *, limit: int = 200
+    ) -> list[AgentEvent]:
+        """The most recent ``agent_events`` rows for one agent, oldest first.
+
+        Reads go straight to Postgres and deliberately do not wait for the
+        write queue to drain: a just-emitted event may lag by one consumer
+        batch, which is acceptable for status views and keeps this read path
+        immune to write-side backpressure.
+        """
+        stmt = (
+            select(models.AgentEvent)
+            .where(models.AgentEvent.agent_id == agent_id)
+            .order_by(
+                models.AgentEvent.timestamp.desc(), models.AgentEvent.id.desc()
+            )
+            .limit(limit)
+        )
+        async with db.session_scope() as session:
+            rows = list((await session.execute(stmt)).scalars())
+        return [
+            AgentEvent(
+                agent_id=row.agent_id,
+                event_type=row.event_type,
+                request_id=row.request_id,
+                state=row.state,
+                payload=row.payload,
+                timestamp=row.timestamp,
+            )
+            for row in reversed(rows)
+        ]
+
     def _enqueue(self, event: AuditEvent) -> None:
         """Queue an event without blocking; never raises to the caller."""
         if self._closed:
@@ -198,7 +285,33 @@ class AuditService:
                     self._queue.task_done()
                 except asyncio.QueueEmpty:  # pragma: no cover - racy edge
                     continue
-                logger.error("Audit queue full, dropped oldest event: %r", dropped)
+                self._note_drop(dropped)
+
+    def _note_drop(self, dropped: AuditEvent) -> None:
+        """Account for one overflow drop; report in aggregate (Step 17).
+
+        Under a sustained Postgres outage the queue overflows on every event;
+        one ERROR per ``drop_log_interval`` summarizing the count replaces
+        the per-event spam, while DEBUG keeps the individual payloads.
+        """
+        self._dropped_total += 1
+        self._dropped_since_log += 1
+        logger.debug("Audit queue full, dropped oldest event: %r", dropped)
+        now = time.monotonic()
+        if (
+            self._last_drop_log
+            and now - self._last_drop_log < self._drop_log_interval
+        ):
+            return
+        logger.error(
+            "Audit queue full: dropped %d event(s) in the last interval "
+            "(%d total since start); most recent drop: %s",
+            self._dropped_since_log,
+            self._dropped_total,
+            type(dropped).__name__,
+        )
+        self._dropped_since_log = 0
+        self._last_drop_log = now
 
     # -- lifecycle -----------------------------------------------------------
 

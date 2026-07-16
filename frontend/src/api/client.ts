@@ -9,9 +9,13 @@
  */
 
 import type {
+  AgentDetail,
+  AgentState,
+  AgentSummary,
   HealthStatus,
   PromptRequest,
   PromptResponse,
+  ReadinessStatus,
   RunStatus,
   SessionStatus,
 } from "../types";
@@ -130,4 +134,64 @@ export function getSession(
 /** GET /api/health — service liveness. */
 export function getHealth(): Promise<HealthStatus> {
   return request<HealthStatus>("/health");
+}
+
+/**
+ * GET /api/health/ready — dependency readiness (model loaded, database
+ * reachable). A 503 is a valid answer carrying the same body shape, so it is
+ * returned as data rather than thrown.
+ */
+export async function getReadiness(): Promise<ReadinessStatus> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/health/ready`);
+  } catch (cause) {
+    throw new ApiError("network", "Cannot reach the LunaBlue backend.", {
+      cause,
+    });
+  }
+  if (response.ok || response.status === 503) {
+    // Clone: a non-JSON 503 (e.g. from the dev proxy with the backend down)
+    // must still be readable by errorFromResponse below.
+    const body = (await response
+      .clone()
+      .json()
+      .catch(() => undefined)) as ReadinessStatus | undefined;
+    if (body && typeof body.status === "string") {
+      return body;
+    }
+  }
+  throw await errorFromResponse(response);
+}
+
+/** Filters accepted by `GET /api/agents`. */
+export interface AgentListFilter {
+  state?: AgentState;
+  sessionId?: string;
+}
+
+/** GET /api/agents — background agents in live state, newest first. */
+export function listAgents(filter: AgentListFilter = {}): Promise<AgentSummary[]> {
+  const query = new URLSearchParams();
+  if (filter.state !== undefined) {
+    query.set("state", filter.state);
+  }
+  if (filter.sessionId !== undefined) {
+    query.set("session_id", filter.sessionId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return request<AgentSummary[]>(`/agents${suffix}`);
+}
+
+/** GET /api/agents/{id} — full detail, reconstructed from audit if evicted. */
+export function getAgent(agentId: string): Promise<AgentDetail> {
+  return request<AgentDetail>(`/agents/${encodeURIComponent(agentId)}`);
+}
+
+/** POST /api/agents/{id}/cancel — request cancellation (asynchronous). */
+export function cancelAgent(agentId: string): Promise<AgentSummary> {
+  return request<AgentSummary>(
+    `/agents/${encodeURIComponent(agentId)}/cancel`,
+    { method: "POST" },
+  );
 }

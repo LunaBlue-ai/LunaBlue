@@ -24,12 +24,24 @@ export interface SnapshotPayload {
   agents: AgentStatus[];
 }
 
-/** One `{type, seq, ts, payload}` wire message, discriminated on `type`. */
-export type ServerMessage =
+/**
+ * One `{type, seq, ts, payload}` wire message, discriminated on `type`.
+ * `degraded: true` on an event means this connection's subscription
+ * overflowed server-side and events were dropped (Step 17); `ping` is the
+ * server heartbeat and carries no payload.
+ */
+export type ServerMessage = { degraded?: boolean } & (
   | { type: "snapshot"; seq: number; ts: string; payload: SnapshotPayload }
   | { type: "run_updated" | "run_evicted"; seq: number; ts: string; payload: RunStatus }
   | { type: "session_updated"; seq: number; ts: string; payload: SessionSummary }
-  | { type: "agent_updated"; seq: number; ts: string; payload: AgentStatus };
+  | {
+      type: "agent_updated" | "agent_evicted";
+      seq: number;
+      ts: string;
+      payload: AgentStatus;
+    }
+  | { type: "ping"; ts: string }
+);
 
 export type SocketStatus = "connecting" | "open" | "closed";
 
@@ -81,6 +93,13 @@ export function openLiveSocket(handlers: LiveSocketHandlers): () => void {
         return;
       }
       handlers.onMessage(message);
+      if (message.degraded) {
+        // The server dropped events for this connection (slow consumer).
+        // Payloads are full snapshots so state is not corrupted, but
+        // transitions were missed: reconnect for a fresh snapshot resync.
+        console.warn("/ws delivery degraded (events dropped); resyncing");
+        socket?.close();
+      }
     };
 
     // A failed handshake also fires onclose, so this single path covers
