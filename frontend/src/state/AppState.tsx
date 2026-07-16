@@ -62,6 +62,8 @@ export interface AppState {
    * "audit_queue". Empty while everything is ready (or unknown).
    */
   readinessIssues: string[];
+  /** Backend version from GET /api/health (Step 18); null until known. */
+  backendVersion: string | null;
 }
 
 export const initialAppState: AppState = {
@@ -72,6 +74,7 @@ export const initialAppState: AppState = {
   agents: {},
   modelStatus: "unknown",
   readinessIssues: [],
+  backendVersion: null,
 };
 
 const TERMINAL_PHASES: ReadonlySet<string> = new Set(["completed", "failed"]);
@@ -109,7 +112,12 @@ export type AppAction =
     }
   /** The request itself failed (network, HTTP, validation). */
   | { type: "prompt_failed"; messageId: string; error: string }
-  | { type: "connectivity_changed"; connectivity: ConnectivityStatus }
+  | {
+      type: "connectivity_changed";
+      connectivity: ConnectivityStatus;
+      /** Backend version, when the probe that proved connectivity knows it. */
+      backendVersion?: string;
+    }
   /** A run snapshot arrived (WebSocket event, snapshot resync, or poll). */
   | { type: "run_updated"; run: RunStatus }
   | { type: "ws_status_changed"; wsStatus: SocketStatus }
@@ -180,11 +188,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           error: action.error,
         }),
       };
-    case "connectivity_changed":
-      if (state.connectivity === action.connectivity) {
+    case "connectivity_changed": {
+      const backendVersion = action.backendVersion ?? state.backendVersion;
+      if (
+        state.connectivity === action.connectivity &&
+        state.backendVersion === backendVersion
+      ) {
         return state;
       }
-      return { ...state, connectivity: action.connectivity };
+      return { ...state, connectivity: action.connectivity, backendVersion };
+    }
     case "run_updated": {
       const { run } = action;
       // A message already tied to this run: refresh its live phase.

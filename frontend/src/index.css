@@ -550,3 +550,10 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Backend version from /api/health (Step 18), e.g. "v1.0.0". */
+.status-version {
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--muted);
+  white-space: nowrap;
+}

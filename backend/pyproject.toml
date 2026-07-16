@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lunablue-backend"
-version = "0.1.0"
+# Single source of truth for the version is app/__init__.py:__version__,
+# surfaced at runtime by /api/health and the UI StatusBar.
+dynamic = ["version"]
 description = "LunaBlue backend — FastAPI service hosting the UI, APIs, LangGraph orchestration, and the local LLM."
 requires-python = ">=3.11"
 dependencies = [
@@ -33,6 +35,9 @@ dev = [
     "httpx",
     "ruff",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "app.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["app*"]

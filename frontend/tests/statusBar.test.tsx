@@ -70,6 +70,24 @@ describe("StatusBar", () => {
     ).toBeInTheDocument();
   });
 
+  // Step 18: backend version.
+
+  it("shows the backend version once the health probe reports it", () => {
+    const { dispatch } = renderWithState(<StatusBar />);
+    expect(screen.queryByText(/^v\d/)).not.toBeInTheDocument();
+
+    dispatch({
+      type: "connectivity_changed",
+      connectivity: "connected",
+      backendVersion: "1.0.0",
+    });
+    expect(screen.getByText("v1.0.0")).toBeInTheDocument();
+
+    // The version is sticky: a later connectivity flap doesn't erase it.
+    dispatch({ type: "connectivity_changed", connectivity: "unreachable" });
+    expect(screen.getByText("v1.0.0")).toBeInTheDocument();
+  });
+
   // Step 17: readiness detail.
 
   it("shows an unhealthy model distinctly from a missing one", () => {

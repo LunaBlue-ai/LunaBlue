@@ -30,6 +30,7 @@ export function StatusBar() {
     agents,
     modelStatus,
     readinessIssues,
+    backendVersion,
   } = useAppState();
   const liveMode =
     wsStatus === "open"
@@ -63,6 +64,11 @@ export function StatusBar() {
         Agents {activeAgents}
       </span>
       {sessionId && <span className="status-session">Session {sessionId}</span>}
+      {backendVersion && (
+        <span className="status-version" title="Backend version (/api/health)">
+          v{backendVersion}
+        </span>
+      )}
     </footer>
   );
 }

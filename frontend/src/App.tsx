@@ -53,9 +53,13 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     getHealth()
-      .then(() => {
+      .then((health) => {
         if (!cancelled) {
-          dispatch({ type: "connectivity_changed", connectivity: "connected" });
+          dispatch({
+            type: "connectivity_changed",
+            connectivity: "connected",
+            backendVersion: health.version,
+          });
         }
       })
       .catch(() => {

@@ -58,7 +58,7 @@ Then verify:
 curl http://localhost:8000/api/health
 ```
 
-Expected response: `{"service":"lunablue","version":"0.1.0","status":"ok"}`
+Expected response: `{"service":"lunablue","version":"1.0.0","status":"ok"}`
 
 `/api/health` is liveness only (the process is up). Dependency readiness —
 database reachable, model loaded and healthy, audit queue not overflowing,
