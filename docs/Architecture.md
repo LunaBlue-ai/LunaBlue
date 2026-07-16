@@ -83,37 +83,43 @@ Postgres stores audit records from the service, including:
 
 ## Directory structure
 
-A clear separation of concerns is recommended. The layout below can be used to scaffold the solution repository; it maps each area to the component documents in [Components/](Components/).
+The layout below is the repository as built (v1.0); it maps each area to the component documents in [Components/](Components/).
 
 ```text
 lunablue/
 ├── README.md
+├── CHANGELOG.md
 ├── .gitignore
-├── .env.example                    # documented environment variables (DB URL, model path, ports)
-├── docker-compose.yml              # local Postgres (and optional pgAdmin) for development
+├── .env.example                    # documented environment variables (DB URL, model path, ports, guards)
+├── docker-compose.yml              # local Postgres for development + throwaway postgres-test (profile "test")
+├── pytest.ini                      # repo-root pytest config: the backend suite runs from here
 │
 ├── backend/                        # Python FastAPI service (Components/API.md)
-│   ├── pyproject.toml              # project metadata + deps (fastapi, langgraph, llama-cpp-python, sqlalchemy, alembic)
+│   ├── pyproject.toml              # project metadata + deps (fastapi, langgraph, sqlalchemy, alembic; llama-cpp-python via the [llm] extra)
 │   ├── alembic.ini
 │   ├── migrations/                 # Alembic migrations for the audit/state schema
 │   │   └── versions/
 │   └── app/
-│       ├── __init__.py
+│       ├── __init__.py             # __version__ — single source of truth, surfaced by /api/health
 │       ├── main.py                 # app factory: lifespan startup, static mount, router registration
-│       ├── config.py               # pydantic-settings: model path, DB URL, WS options, governance flags
+│       ├── config.py               # pydantic-settings: model path, DB URL, WS options, governance flags, guard limits
+│       ├── startup.py              # fail-fast settings validation: one aggregated, actionable error (Step 17)
 │       │
 │       ├── api/                    # HTTP/WS surface — routing only, no business logic
 │       │   ├── __init__.py
+│       │   ├── errors.py           # error taxonomy: every non-2xx body is {code, message, request_id, detail}
 │       │   ├── routes/
 │       │   │   ├── __init__.py
 │       │   │   ├── prompt.py       # POST /api/prompt — prompt submission
 │       │   │   ├── agents.py       # GET /api/agents, /api/agents/{id} — agent status
-│       │   │   └── health.py       # health/readiness checks
+│       │   │   ├── state.py        # GET /api/runs/{id}, /api/sessions/{id} — run status (polling fallback)
+│       │   │   └── health.py       # GET /api/health (liveness), /api/health/ready (per-dependency readiness)
 │       │   ├── websocket.py        # WS endpoint pushing shared-state and agent lifecycle updates
 │       │   └── schemas/            # Pydantic request/response models
 │       │       ├── __init__.py
 │       │       ├── prompt.py
-│       │       └── agent.py
+│       │       ├── agent.py
+│       │       └── state.py
 │       │
 │       ├── governance/             # prompt intake governance (Components/API.md — Governance section)
 │       │   ├── __init__.py
@@ -123,6 +129,7 @@ lunablue/
 │       ├── orchestration/          # LangGraph graphs and background agents
 │       │   ├── __init__.py
 │       │   ├── graph.py            # main request graph definition
+│       │   ├── pipeline.py         # runs the graph for one prompt: state updates + audit events per phase
 │       │   ├── nodes/              # individual graph nodes
 │       │   │   ├── __init__.py
 │       │   │   ├── prompt_engineering.py
@@ -131,70 +138,81 @@ lunablue/
 │       │   │   └── respond.py      # final response synthesis
 │       │   ├── agents/             # background agent subgraphs
 │       │   │   ├── __init__.py
-│       │   │   └── base.py         # shared agent lifecycle contract
+│       │   │   ├── base.py         # shared agent lifecycle contract
+│       │   │   └── research.py     # the built-in research agent
 │       │   └── runner.py           # background execution / task queue for agent subgraphs
 │       │
 │       ├── llm/                    # in-process llama.cpp runtime
 │       │   ├── __init__.py
 │       │   ├── runtime.py          # single global llama-cpp-python instance (created at startup)
-│       │   └── prompts/            # prompt templates used by graph nodes
+│       │   └── prompts/            # prompt templates (*.md) used by graph nodes
 │       │
 │       ├── state/                  # shared in-memory runtime state
 │       │   ├── __init__.py
-│       │   ├── store.py            # session, graph, and agent state + task queues
+│       │   ├── store.py            # session, run, and agent state
 │       │   └── events.py           # pub/sub bridge from state changes to WebSocket broadcasts
 │       │
 │       ├── audit/                  # Postgres log/audit (Components/AUDIT.md)
 │       │   ├── __init__.py
 │       │   ├── db.py               # SQLAlchemy engine and session management
 │       │   ├── models.py           # tables: prompt_requests, prompt_responses, agent_events, sessions
-│       │   └── service.py          # structured audit writer, decoupled from the request path
+│       │   ├── service.py          # structured audit writer, decoupled from the request path
+│       │   ├── redaction.py        # regex masking of secrets/PII before rows are written (docs/DataRetention.md)
+│       │   └── retention.py        # deletes audit rows older than the configured window (scripts/retention)
 │       │
 │       └── static/                 # built frontend output copied here at build time (gitignored)
 │
 ├── frontend/                       # React app (Components/WEB.md)
 │   ├── package.json
-│   ├── vite.config.ts              # build output wired to backend/app/static (or copied by script)
+│   ├── vite.config.ts              # dev server proxies /api and /ws to FastAPI
 │   ├── index.html
 │   ├── tsconfig.json
-│   └── src/
-│       ├── main.tsx
-│       ├── App.tsx
-│       ├── api/
-│       │   ├── client.ts           # HTTP client for /api/prompt and agent status
-│       │   └── ws.ts               # WebSocket connection with polling fallback
-│       ├── components/
-│       │   ├── Chat/               # prompt input and response display
-│       │   ├── AgentPanel/         # agent IDs, queue status, last results
-│       │   └── StatusBar/          # backend connectivity and session status
-│       ├── hooks/                  # useWebSocket, usePromptSubmit, useAgentStatus
-│       ├── state/                  # React context for prompts, agents, live progress
-│       └── types/                  # shared TS types mirroring backend schemas
+│   ├── src/
+│   │   ├── main.tsx
+│   │   ├── App.tsx
+│   │   ├── api/
+│   │   │   ├── client.ts           # HTTP client for /api/prompt, agents, state, health
+│   │   │   └── ws.ts               # WebSocket connection with reconnect
+│   │   ├── components/
+│   │   │   ├── Chat/               # prompt input, message list, live phase display
+│   │   │   ├── AgentPanel/         # agent list, states, expandable event detail
+│   │   │   └── StatusBar/          # connectivity, live channel, model/readiness, agents, version
+│   │   ├── hooks/                  # useWebSocket, usePromptSubmit
+│   │   ├── state/                  # React context + reducer for prompts, agents, live progress
+│   │   └── types/                  # shared TS types mirroring backend schemas
+│   └── tests/                      # Vitest + React Testing Library suites
 │
 ├── models/                         # local GGUF model files (gitignored; README explains how to fetch)
 │   └── README.md
 │
 ├── docs/                           # this documentation set
+│   ├── README.md
 │   ├── Architecture.md
-│   └── Components/
-│       ├── API.md
-│       ├── AUDIT.md
-│       └── WEB.md
+│   ├── BuildPlan.md                # the 18-step incremental build plan
+│   ├── DataRetention.md            # audit redaction + retention windows
+│   ├── Components/
+│   │   ├── API.md
+│   │   ├── AUDIT.md
+│   │   └── WEB.md
+│   └── Steps/                      # the per-step build prompts (Step01–Step18)
 │
 ├── tests/
-│   ├── backend/                    # pytest suites
-│   │   ├── conftest.py             # app fixture, test DB, fake LLM runtime
-│   │   ├── test_api/               # route-level tests (prompt, agents, health, WS)
-│   │   ├── test_governance/
-│   │   ├── test_orchestration/     # graph and node tests with the LLM stubbed
-│   │   └── test_audit/
-│   └── frontend/                   # Vitest/RTL suites (or colocate in frontend/src if preferred)
+│   └── backend/                    # pytest suites, run from the repo root
+│       ├── conftest.py             # app fixture, test DB, fake LLM runtime
+│       ├── fakes.py                # FakeLlamaRuntime — the suite never needs a model
+│       ├── test_startup.py
+│       ├── test_api/               # route-level tests (prompt, agents, health, errors, WS, static)
+│       ├── test_governance/
+│       ├── test_orchestration/     # graph, pipeline, runner, and runtime tests with the LLM faked
+│       ├── test_state/
+│       └── test_audit/
 │
-└── scripts/
-    ├── setup.ps1 / setup.sh        # create venv, install deps, install frontend packages
-    ├── build_frontend.ps1          # build React app and copy dist into backend/app/static
-    ├── migrate.ps1                 # run Alembic migrations against Postgres
-    └── download_model.ps1          # fetch the GGUF model into /models
+└── scripts/                        # each as .ps1 (Windows) and .sh (macOS/Linux)
+    ├── setup                       # prereq checks, venv, backend + frontend installs, .env
+    ├── build_frontend              # build React app and copy dist into backend/app/static
+    ├── migrate                     # run Alembic migrations against Postgres
+    ├── download_model              # fetch the default GGUF model into models/
+    └── retention                   # apply the audit retention policy (supports --dry-run)
 ```
 
 ### Directory design rationale
@@ -209,7 +227,7 @@ lunablue/
 
 **Audit decoupling.** `audit/service.py` should accept structured events and write them off the hot path (background task or queue), per the implementation note in [Components/AUDIT.md](Components/AUDIT.md). Alembic migrations live with the backend since the schema is owned by the Python service.
 
-**Tests at the root.** Backend tests stub the LLM runtime via `conftest.py` fixtures so the suite runs without a model file. If the team prefers colocated frontend tests (`frontend/src/__tests__`), that is a reasonable deviation — the root `tests/frontend` folder is only needed if CI wants one test root.
+**Tests.** Backend tests live at the repo root (`tests/backend`, run via the root `pytest.ini`) and fake the LLM runtime via `conftest.py`/`fakes.py`, so the suite runs without a model file or GPU. Frontend tests are colocated with the app in `frontend/tests` and run with Vitest. Database-backed tests use the throwaway `postgres-test` compose service and skip (locally) or must pass (CI) when it is absent — see the root README.
 
 **Models are data, not code.** `/models` holds GGUF artifacts and is gitignored; `scripts/download_model` plus a README make the setup reproducible without committing multi-gigabyte files.
 

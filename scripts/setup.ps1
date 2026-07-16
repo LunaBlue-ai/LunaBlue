@@ -8,6 +8,8 @@
 #   4. Installs frontend dependencies: npm ci in frontend/.
 #   5. Copies .env.example to .env if absent.
 # Usage: scripts/setup.ps1
+# NOTE: keep this file pure ASCII - Windows PowerShell 5.1 parses BOM-less
+# scripts as ANSI, and any multi-byte character breaks it.
 
 $ErrorActionPreference = "Stop"
 
@@ -27,7 +29,7 @@ function Fail([string]$Message) {
     exit 1
 }
 
-# ── [1/5] Prerequisites ─────────────────────────────────────────────────────
+# -- [1/5] Prerequisites -----------------------------------------------------
 Step "[1/5] Checking prerequisites"
 
 # Python >= 3.11. Prefer the Windows launcher, fall back to python on PATH.
@@ -48,7 +50,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Python $pyVersion  OK"
 
-# Node >= 20 (Vite 7 requires it) — installs come with npm.
+# Node >= 20 (Vite 7 requires it) - installs come with npm.
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
     Fail "Node.js not found. Install Node 22 LTS from https://nodejs.org/ and re-run."
@@ -60,7 +62,7 @@ if ($nodeMajor -lt 20) {
 }
 Write-Host "Node $nodeVersion  OK"
 
-# Docker CLI — needed for the Postgres audit store (docker compose).
+# Docker CLI - needed for the Postgres audit store (docker compose).
 $docker = Get-Command docker -ErrorAction SilentlyContinue
 if (-not $docker) {
     Fail "Docker not found. Install Docker Desktop from https://www.docker.com/products/docker-desktop/ and re-run. LunaBlue uses it for the Postgres audit database (docker compose up -d postgres)."
@@ -72,10 +74,10 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "Docker $((docker --version) -replace 'Docker version ', '' -replace ',.*', '')  OK"
 }
 
-# ── [2/5] Python venv ───────────────────────────────────────────────────────
+# -- [2/5] Python venv -------------------------------------------------------
 Step "[2/5] Python venv (backend/.venv)"
 if (Test-Path $venvPython) {
-    Write-Host "venv already exists — reusing it."
+    Write-Host "venv already exists - reusing it."
 } else {
     & $pythonExe @pythonArgs -m venv $venvDir
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPython)) {
@@ -84,7 +86,7 @@ if (Test-Path $venvPython) {
     Write-Host "venv created."
 }
 
-# ── [3/5] Backend install ───────────────────────────────────────────────────
+# -- [3/5] Backend install ---------------------------------------------------
 Step "[3/5] Installing backend (pip install -e backend[dev])"
 & $venvPython -m pip install --quiet -e "$backendDir[dev]"
 if ($LASTEXITCODE -ne 0) {
@@ -107,7 +109,7 @@ See backend/README.md (Install variants) for GPU builds.
 }
 Write-Host "LLM runtime installed."
 
-# ── [4/5] Frontend install ──────────────────────────────────────────────────
+# -- [4/5] Frontend install --------------------------------------------------
 Step "[4/5] Installing frontend dependencies (npm ci)"
 Push-Location $frontendDir
 try {
@@ -120,11 +122,11 @@ try {
 }
 Write-Host "Frontend dependencies installed."
 
-# ── [5/5] .env ──────────────────────────────────────────────────────────────
+# -- [5/5] .env --------------------------------------------------------------
 Step "[5/5] Environment file"
 $envFile = Join-Path $repoRoot ".env"
 if (Test-Path $envFile) {
-    Write-Host ".env already exists — leaving it untouched."
+    Write-Host ".env already exists - leaving it untouched."
 } else {
     Copy-Item (Join-Path $repoRoot ".env.example") $envFile
     Write-Host ".env created from .env.example (defaults are fine for local use)."

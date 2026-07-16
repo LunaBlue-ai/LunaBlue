@@ -27,15 +27,14 @@ How a request flows: the user submits a prompt in the React UI → FastAPI inges
 
 ## Documentation
 
-- [Architecture.md](Architecture.md) — full system architecture, recommended directory structure, and design principles.
+- [Architecture.md](Architecture.md) — full system architecture, directory structure, and design principles.
 - [BuildPlan.md](BuildPlan.md) — the 18-step incremental plan for building the solution to full capability.
 - [Steps/](Steps/README.md) — a detailed, ready-to-use LLM prompt for executing each build plan step.
 - [Components/API.md](Components/API.md) — the FastAPI service, LangGraph orchestration, and local LLM loop.
 - [Components/WEB.md](Components/WEB.md) — the React frontend.
 - [Components/AUDIT.md](Components/AUDIT.md) — the Postgres log/audit store.
 - [DataRetention.md](DataRetention.md) — data retention and privacy safeguards: audit redaction and per-table retention windows.
-- [Research.md](Research.md) — LLM options research: local vs. cloud trade-offs, hardware requirements, and cost analysis behind the local-first choice.
 
 ## License
 
-This project is licensed under the terms of the repository [LICENSE](LICENSE).
+This project is licensed under the terms of the repository [LICENSE](../LICENSE).

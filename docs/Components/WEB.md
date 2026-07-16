@@ -18,10 +18,11 @@ This component lives under `frontend/` in the repository layout defined in [Arch
 
 - `vite.config.ts` — Vite build, with output wired (or copied by `scripts/build_frontend`) into `backend/app/static`.
 - `src/api/` — `client.ts` (HTTP client for `/api/prompt` and agent status), `ws.ts` (WebSocket connection with polling fallback).
-- `src/components/` — `Chat/` (prompt input and response display), `AgentPanel/` (agent IDs, queue status, last results), `StatusBar/` (backend connectivity and session status).
-- `src/hooks/` — `useWebSocket`, `usePromptSubmit`, `useAgentStatus`.
-- `src/state/` — React context for prompts, agents, and live progress.
+- `src/components/` — `Chat/` (prompt input, message list, live run phases), `AgentPanel/` (agent list, states, expandable event detail), `StatusBar/` (backend connectivity, live channel, model/readiness status, active-agent count, session id, backend version).
+- `src/hooks/` — `useWebSocket` (socket lifecycle + polling fallback), `usePromptSubmit`.
+- `src/state/` — React context + reducer (`AppState.tsx`) for prompts, agents, and live progress.
 - `src/types/` — shared TypeScript types mirroring the backend Pydantic schemas.
+- `tests/` — Vitest + React Testing Library suites (`npm test`).
 
 ## Build Approach
 

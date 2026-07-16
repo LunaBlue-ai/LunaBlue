@@ -20,10 +20,10 @@ This component is the core service container for LunaBlue. It hosts the React fr
 This component lives under `backend/` in the repository layout defined in [Architecture.md](../Architecture.md#directory-structure). Each responsibility maps to a subpackage of `backend/app/`:
 
 - `main.py` — app factory; the lifespan handler loads config, creates the SQLAlchemy engine, instantiates the global llama.cpp runtime once, initializes the state store, then mounts routes and static files.
-- `config.py` — pydantic-settings: model path, DB URL, WebSocket options, governance flags.
-- `api/` — HTTP/WS surface, routing only: `routes/prompt.py` (POST `/api/prompt`), `routes/agents.py` (agent status), `routes/health.py`, `websocket.py`, and Pydantic `schemas/`.
+- `config.py` — pydantic-settings: model path, DB URL, WebSocket options, governance flags, guard limits; `startup.py` validates them fail-fast at boot.
+- `api/` — HTTP/WS surface, routing only: `routes/prompt.py` (POST `/api/prompt`), `routes/agents.py` (GET `/api/agents`, GET `/api/agents/{id}`, POST `/api/agents/{id}/cancel`), `routes/state.py` (GET `/api/runs/{request_id}`, GET `/api/sessions/{session_id}` — the polling fallback), `routes/health.py` (`/api/health`, `/api/health/ready`), `websocket.py` (`/ws`), `errors.py` (error taxonomy), and Pydantic `schemas/`.
 - `governance/` — prompt intake: `intake.py` (normalization and enrichment), `policy.py` (policy tags, safety directives).
-- `orchestration/` — `graph.py` (main request graph), `nodes/` (prompt engineering, LLM review, agent spawn, respond), `agents/` (background subgraphs), `runner.py` (background execution / task queue).
+- `orchestration/` — `graph.py` (main request graph), `pipeline.py` (runs the graph for one prompt: state updates + audit events per phase), `nodes/` (prompt engineering, LLM review, agent spawn, respond), `agents/` (background subgraphs; `research.py` is the built-in agent), `runner.py` (background execution / task queue).
 - `llm/` — `runtime.py` holds the single global `llama-cpp-python` instance; `prompts/` holds templates. No other package touches llama.cpp directly.
 - `state/` — `store.py` (session, graph, and agent state + task queues), `events.py` (pub/sub bridge to WebSocket broadcasts).
 - `audit/` — Postgres integration; see [AUDIT.md](AUDIT.md).
