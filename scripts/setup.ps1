@@ -109,6 +109,12 @@ See backend/README.md (Install variants) for GPU builds.
 }
 Write-Host "LLM runtime installed."
 
+# NVIDIA GPU present? The default install above is CPU-only and silently
+# ignores LLM_GPU_LAYERS; point at the GPU rebuild instructions.
+if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+    Write-Host "NVIDIA GPU detected: the default llama-cpp-python build is CPU-only. To offload inference to the GPU, install a CUDA-enabled build and set LLM_GPU_LAYERS=-1 in .env - see backend/README.md (Install variants)." -ForegroundColor Yellow
+}
+
 # -- [4/5] Frontend install --------------------------------------------------
 Step "[4/5] Installing frontend dependencies (npm ci)"
 Push-Location $frontendDir

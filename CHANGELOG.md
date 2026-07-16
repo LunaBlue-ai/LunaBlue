@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- GPU visibility: the runtime now probes whether the installed
+  `llama-cpp-python` build supports GPU offload. When `LLM_GPU_LAYERS` != 0 on
+  a CPU-only build (which silently ignores it), startup logs a warning, and
+  `model_info` / `/api/health/ready` expose `gpu_offload_supported`. Setup
+  scripts
+  print a hint when an NVIDIA GPU is detected; backend/README.md documents the
+  CUDA wheel install (match the wheel's CUDA series to the installed toolkit).
+
 ## v1.0.0 — 2026-07-15
 
 First release. LunaBlue reaches full capability: a fresh clone on a machine

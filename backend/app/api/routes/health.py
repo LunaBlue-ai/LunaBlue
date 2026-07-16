@@ -45,20 +45,32 @@ def _check_model(request: Request) -> tuple[dict[str, Any], str]:
     runtime = getattr(request.app.state, "llm_runtime", None)
     if runtime is None or not runtime.loaded:
         return {"ok": False, "detail": "not_loaded"}, "not_loaded"
-    model_id = runtime.model_info["model_id"]
+    info = runtime.model_info
+    model_id = info["model_id"]
+    # True/False from the startup probe; None when unknown (test fakes).
+    offload = info["gpu_offload_supported"]
     if not runtime.healthy:
         return (
             {
                 "ok": False,
                 "detail": "unhealthy",
                 "model_id": model_id,
+                "gpu_offload_supported": offload,
                 # last_error is an exception summary, not a stack trace or
                 # path; full details are in the logs.
                 "error": runtime.last_error,
             },
             model_id,
         )
-    return {"ok": True, "detail": "loaded", "model_id": model_id}, model_id
+    return (
+        {
+            "ok": True,
+            "detail": "loaded",
+            "model_id": model_id,
+            "gpu_offload_supported": offload,
+        },
+        model_id,
+    )
 
 
 async def _check_database() -> dict[str, Any]:

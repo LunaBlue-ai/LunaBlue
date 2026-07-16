@@ -95,6 +95,8 @@ class FakeLlamaRuntime(LlamaRuntime):
 
     def load(self) -> None:
         # The real load() insists the model file exists; the fake needs none.
+        # GPU offload support stays None (unknown): the fake never probes
+        # llama_cpp, so model_info reports gpu_offload_supported=None.
         self.fake = FakeLlama(
             model_path=self._model_path,
             n_ctx=self._context_size,

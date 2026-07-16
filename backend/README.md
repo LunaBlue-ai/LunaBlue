@@ -42,7 +42,19 @@ CMAKE_ARGS="-DGGML_METAL=on" pip install --force-reinstall --no-cache-dir llama-
 CMAKE_ARGS="-DGGML_HIPBLAS=on" pip install --force-reinstall --no-cache-dir llama-cpp-python
 ```
 
-On Windows (PowerShell) set the variable first: `$env:CMAKE_ARGS = "-DGGML_CUDA=on"`. Source builds need CMake and a C++ toolchain (plus the CUDA/ROCm SDK for those variants); prebuilt wheels for common configurations are available via the project's wheel index, e.g. `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124`.
+On Windows (PowerShell) set the variable first: `$env:CMAKE_ARGS = "-DGGML_CUDA=on"`. Source builds need CMake and a C++ toolchain (plus the CUDA/ROCm SDK for those variants).
+
+Prebuilt CUDA wheels avoid the toolchain entirely. Two things must line up: the wheel's CUDA series must match the CUDA runtime installed on the machine (check `nvidia-smi` / `$env:CUDA_PATH` — a `cu124` wheel needs the 12.x runtime DLLs, `cu130` the 13.x ones), and pip needs the wheel index for `llama-cpp-python` itself plus PyPI for its dependencies:
+
+```powershell
+pip install llama-cpp-python --force-reinstall --no-cache-dir --only-binary=:all: `
+    --index-url https://abetlen.github.io/llama-cpp-python/whl/cu130 `
+    --extra-index-url https://pypi.org/simple
+```
+
+(`--only-binary=:all:` stops pip from "helpfully" falling back to a CPU source build. Verify with `python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"`.)
+
+The runtime probes this at startup: requesting `LLM_GPU_LAYERS` != 0 on a CPU-only build logs a warning (llama.cpp would otherwise silently run on CPU), and `/api/health/ready` reports the capability as `gpu_offload_supported` in the model check.
 
 ## Run
 

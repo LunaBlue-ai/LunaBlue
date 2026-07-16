@@ -82,6 +82,12 @@ if ! "$venv_python" -m pip install --quiet -e "$backend_dir[dev,llm]"; then
 fi
 echo "LLM runtime installed."
 
+# NVIDIA GPU present? The default install above is CPU-only and silently
+# ignores LLM_GPU_LAYERS; point at the GPU rebuild instructions.
+if command -v nvidia-smi > /dev/null 2>&1; then
+    echo "note: NVIDIA GPU detected - the default llama-cpp-python build is CPU-only. To offload inference to the GPU, install a CUDA-enabled build and set LLM_GPU_LAYERS=-1 in .env; see backend/README.md (Install variants)."
+fi
+
 # -- [4/5] Frontend install --------------------------------------------------
 step "[4/5] Installing frontend dependencies (npm ci)"
 (cd "$frontend_dir" && npm ci --no-fund --no-audit) \

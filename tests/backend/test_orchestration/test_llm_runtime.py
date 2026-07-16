@@ -142,10 +142,47 @@ def test_model_info_and_loaded_flag(tmp_path):
     assert info["model_id"] == "model.gguf"
     assert info["context_size"] == 1024
     assert info["loaded"] is True
+    # No probe injected and no llama_cpp import: capability is unknown.
+    assert info["gpu_offload_supported"] is None
 
     runtime.close()
     assert not runtime.loaded
     assert fake.closed
+
+
+def test_cpu_only_build_with_gpu_layers_warns(tmp_path, caplog):
+    """A CPU-only llama-cpp-python build silently ignores n_gpu_layers; the
+    runtime must surface that instead of letting inference quietly run on
+    CPU (the exact failure mode this guard exists for)."""
+    with caplog.at_level("WARNING", logger="app.llm.runtime"):
+        runtime, _ = make_runtime(
+            tmp_path, gpu_layers=-1, gpu_support_probe=lambda: False
+        )
+    assert any(
+        "no GPU offload support" in record.message for record in caplog.records
+    )
+    assert runtime.model_info["gpu_offload_supported"] is False
+
+
+@pytest.mark.parametrize(
+    ("gpu_layers", "probe_result"),
+    [
+        (0, False),  # CPU-only requested: nothing to warn about
+        (-1, True),  # GPU requested and the build supports it
+        (5, None),  # capability unknown (no llama_cpp): stay silent
+    ],
+)
+def test_no_warning_when_offload_matches_config(
+    tmp_path, caplog, gpu_layers, probe_result
+):
+    with caplog.at_level("WARNING", logger="app.llm.runtime"):
+        runtime, _ = make_runtime(
+            tmp_path, gpu_layers=gpu_layers, gpu_support_probe=lambda: probe_result
+        )
+    assert not any(
+        "GPU offload" in record.message for record in caplog.records
+    )
+    assert runtime.model_info["gpu_offload_supported"] is probe_result
 
 
 def test_system_prompt_template_loads():

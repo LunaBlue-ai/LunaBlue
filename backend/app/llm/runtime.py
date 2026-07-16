@@ -35,6 +35,24 @@ logger = logging.getLogger(__name__)
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 
+def _probe_gpu_offload_support() -> bool | None:
+    """Whether the installed llama-cpp-python build can offload to a GPU.
+
+    Returns None when ``llama_cpp`` is not importable (test runs against a
+    fake factory) — unknown, not a misconfiguration. A CPU-only build
+    silently ignores ``n_gpu_layers``, so an explicit False is the signal
+    :meth:`LlamaRuntime.load` warns on.
+    """
+    try:
+        import llama_cpp
+    except ImportError:
+        return None
+    try:
+        return bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:  # pragma: no cover - defensive against ABI surprises
+        return None
+
+
 def load_system_prompt(name: str = "system") -> str:
     """Read a prompt template from ``app/llm/prompts/<name>.md``."""
     return (_PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8").strip()
@@ -148,9 +166,10 @@ class GenerationResult:
 class LlamaRuntime:
     """Wrapper around one shared ``llama_cpp.Llama`` instance.
 
-    ``llama_factory`` exists for tests only: it replaces the ``Llama`` class
-    so the suite runs without a model file or the ``llama-cpp-python``
-    package installed.
+    ``llama_factory`` and ``gpu_support_probe`` exist for tests only: they
+    replace the ``Llama`` class and the GPU-offload capability probe so the
+    suite runs without a model file or the ``llama-cpp-python`` package
+    installed.
     """
 
     def __init__(
@@ -163,6 +182,7 @@ class LlamaRuntime:
         temperature: float = 0.7,
         generation_timeout_seconds: float = 0.0,
         llama_factory: Callable[..., Any] | None = None,
+        gpu_support_probe: Callable[[], bool | None] | None = None,
     ) -> None:
         self._model_path = model_path
         self._context_size = context_size
@@ -174,6 +194,7 @@ class LlamaRuntime:
         # Per-call wall-clock guard (Step 17); 0 disables it.
         self._generation_timeout = generation_timeout_seconds
         self._llama_factory = llama_factory
+        self._gpu_support_probe = gpu_support_probe
         self._llama: Any = None
         self._model_id = Path(model_path).name
         # Health flag (Step 17): cleared when the model itself raises (a
@@ -182,6 +203,10 @@ class LlamaRuntime:
         # self-heals when the crash was transient.
         self._healthy = True
         self._last_error: str | None = None
+        # Set by load(): False means the installed llama-cpp-python build
+        # cannot offload to a GPU (n_gpu_layers is silently ignored); None
+        # means unknown (llama_cpp not importable, i.e. a test fake).
+        self._gpu_offload_supported: bool | None = None
         # Serializes all inference on the single Llama instance, foreground
         # callers first (Step 14).
         self._gate = _PriorityGate()
@@ -194,10 +219,25 @@ class LlamaRuntime:
         if not path.is_file():
             raise ModelNotFoundError(self._model_path)
         factory = self._llama_factory
+        probe = self._gpu_support_probe
         if factory is None:
-            from llama_cpp import Llama  # the only llama_cpp import in the codebase
+            # llama_cpp is only ever imported inside app.llm (here and in
+            # _probe_gpu_offload_support).
+            from llama_cpp import Llama
 
             factory = Llama
+            probe = probe or _probe_gpu_offload_support
+        # With an injected factory and no injected probe the capability stays
+        # None (unknown): fakes never import llama_cpp.
+        self._gpu_offload_supported = probe() if probe is not None else None
+        if self._gpu_layers != 0 and self._gpu_offload_supported is False:
+            logger.warning(
+                "LLM_GPU_LAYERS=%d requested, but the installed "
+                "llama-cpp-python build has no GPU offload support — "
+                "inference will run on CPU. Reinstall a GPU-enabled build "
+                "(see backend/README.md, 'Install variants').",
+                self._gpu_layers,
+            )
         started = time.perf_counter()
         self._llama = factory(
             model_path=str(path),
@@ -254,6 +294,7 @@ class LlamaRuntime:
             "model_path": self._model_path,
             "context_size": self._context_size,
             "gpu_layers": self._gpu_layers,
+            "gpu_offload_supported": self._gpu_offload_supported,
             "loaded": self.loaded,
             "healthy": self.healthy,
         }
