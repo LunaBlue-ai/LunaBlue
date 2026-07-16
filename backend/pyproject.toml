@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lunablue-backend"
+# Single source of truth for the version is app/__init__.py:__version__,
+# surfaced at runtime by /api/health and the UI StatusBar.
+dynamic = ["version"]
+description = "LunaBlue backend — FastAPI service hosting the UI, APIs, LangGraph orchestration, and the local LLM."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "sqlalchemy>=2.0",
+    "asyncpg",
+    "alembic",
+    "greenlet",
+    "langgraph",
+]
+
+[project.optional-dependencies]
+# The real llama.cpp runtime. Optional so tests and CI install everything
+# they need without compiling llama-cpp-python or downloading a model —
+# the suite runs against tests/backend/fakes.FakeLlamaRuntime instead.
+# Running the actual server requires: pip install -e backend[llm]
+llm = [
+    "llama-cpp-python",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "ruff",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "app.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["llm/prompts/*.md"]
+
+# pytest configuration lives in the repo-root pytest.ini (Step 16): the
+# consolidated suite under tests/backend is run from the repository root.

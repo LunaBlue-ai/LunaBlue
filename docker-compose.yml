@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: lunablue-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env (copy .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env (copy .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env (copy .env.example)}
+    ports:
+      - "5432:5432"
+    volumes:
+      - lunablue_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Throwaway Postgres for the test suite (Step 16): fixed credentials, a
+  # non-default port so it never collides with the dev database above, and
+  # tmpfs storage so every start is a clean slate. Not started by default:
+  #   docker compose --profile test up -d postgres-test
+  postgres-test:
+    image: postgres:16
+    container_name: lunablue-postgres-test
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: lunablue_test
+      POSTGRES_PASSWORD: lunablue_test
+      POSTGRES_DB: lunablue_test
+    ports:
+      - "55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lunablue_test -d lunablue_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  # Optional: pgAdmin for browsing the audit schema during development.
+  # Uncomment and add PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD to .env.
+  # pgadmin:
+  #   image: dpage/pgadmin4:8
+  #   container_name: lunablue-pgadmin
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+  #     PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+  #   ports:
+  #     - "5050:80"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+
+volumes:
+  lunablue_pgdata:
