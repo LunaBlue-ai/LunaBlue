@@ -431,3 +431,96 @@ async def test_graph_without_a_runner_never_detours(tmp_path):
         "llm_review",
         "respond",
     ]
+
+
+# -- Step 17 runaway guards -------------------------------------------------------
+
+
+async def test_agent_wall_clock_timeout_cancels_and_audits(tmp_path):
+    async def stuck(context: AgentContext) -> AgentResult:
+        await asyncio.sleep(60)
+        return AgentResult(summary="never reached")  # pragma: no cover
+
+    runner, store, audit, _ = make_runner(
+        tmp_path, stuck, timeout_seconds=0.05
+    )
+    agent_id = await runner.spawn(AgentSpec(kind="scripted", task="runaway"))
+
+    await wait_until(lambda: store.get_agent(agent_id).state == "cancelled")
+    snapshot = store.get_agent(agent_id)
+    assert "wall-clock timeout" in snapshot.error
+
+    terminal = audit.events_for(agent_id)[-1]
+    assert terminal["event_type"] == "cancelled"
+    assert terminal["payload"]["reason"] == "wall-clock timeout"
+    assert terminal["payload"]["timeout_seconds"] == 0.05
+
+    # The runner survives the runaway agent: the next one runs normally.
+    quick = scripted(
+        "quick", lambda ctx: _completed()
+    )
+    runner._agent_types["quick"] = quick
+    next_id = await runner.spawn(AgentSpec(kind="quick", task="ok"))
+    await wait_until(lambda: store.get_agent(next_id).state == "completed")
+    await runner.close()
+
+
+async def _completed() -> AgentResult:
+    return AgentResult(summary="done")
+
+
+async def test_agent_step_limit_fails_the_agent_and_audits(tmp_path):
+    async def chatty(context: AgentContext) -> AgentResult:
+        for i in range(10):
+            await context.generate(f"call {i}")
+        return AgentResult(summary="never reached")  # pragma: no cover
+
+    runner, store, audit, fake = make_runner(tmp_path, chatty, max_steps=3)
+    agent_id = await runner.spawn(AgentSpec(kind="scripted", task="chatty"))
+
+    await wait_until(lambda: store.get_agent(agent_id).state == "failed")
+    snapshot = store.get_agent(agent_id)
+    assert "step limit" in snapshot.error
+    assert "3" in snapshot.error
+    # The over-budget call never reached the model.
+    assert len(fake.calls) == 3
+
+    terminal = audit.events_for(agent_id)[-1]
+    assert terminal["event_type"] == "failed"
+    assert "step limit" in terminal["payload"]["error"]
+    await runner.close()
+
+
+async def test_generation_timeout_inside_agent_fails_it_as_generation_timeout(
+    tmp_path,
+):
+    """A per-call generation timeout is a failed agent (audited as such),
+    not a wall-clock cancellation."""
+    runtime, fake = make_runtime(tmp_path, generation_timeout_seconds=0.05)
+    store = StateStore()
+    audit = FakeAuditService()
+
+    async def one_call(context: AgentContext) -> AgentResult:
+        await context.generate("slow")
+        return AgentResult(summary="never reached")  # pragma: no cover
+
+    runner = AgentRunner(
+        runtime=runtime,
+        store=store,
+        audit=audit,
+        timeout_seconds=5.0,  # generous: the per-call guard must fire first
+        agent_types={"scripted": scripted("scripted", one_call)},
+    )
+    runner.start()
+    fake.block_seconds = 0.3
+    agent_id = await runner.spawn(AgentSpec(kind="scripted", task="slow gen"))
+
+    await wait_until(lambda: store.get_agent(agent_id).state == "failed")
+    snapshot = store.get_agent(agent_id)
+    assert "GenerationTimeoutError" in snapshot.error
+
+    terminal = audit.events_for(agent_id)[-1]
+    assert terminal["event_type"] == "failed"
+    assert terminal["payload"]["reason"] == "generation timeout"
+    await asyncio.sleep(0.3)  # let the abandoned inference thread drain
+    await runner.close()

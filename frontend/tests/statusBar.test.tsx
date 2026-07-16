@@ -69,4 +69,37 @@ describe("StatusBar", () => {
       screen.getByText(`Session ${getState().sessionId}`),
     ).toBeInTheDocument();
   });
+
+  // Step 17: readiness detail.
+
+  it("shows an unhealthy model distinctly from a missing one", () => {
+    const { dispatch } = renderWithState(<StatusBar />);
+    dispatch({
+      type: "model_status_changed",
+      modelStatus: "unhealthy",
+      readinessIssues: ["model"],
+    });
+    expect(screen.getByText("Model unhealthy")).toBeInTheDocument();
+  });
+
+  it("surfaces failing readiness checks and clears them on recovery", () => {
+    const { dispatch } = renderWithState(<StatusBar />);
+    expect(screen.queryByText(/^Degraded:/)).not.toBeInTheDocument();
+
+    dispatch({
+      type: "model_status_changed",
+      modelStatus: "loaded",
+      readinessIssues: ["database", "audit_queue"],
+    });
+    expect(
+      screen.getByText("Degraded: database, audit_queue"),
+    ).toBeInTheDocument();
+
+    dispatch({
+      type: "model_status_changed",
+      modelStatus: "loaded",
+      readinessIssues: [],
+    });
+    expect(screen.queryByText(/^Degraded:/)).not.toBeInTheDocument();
+  });
 });

@@ -49,6 +49,30 @@ This component lives under `backend/` in the repository layout defined in [Archi
 - Separate API routing (`api/`) from orchestration (`orchestration/`) and state management (`state/`) logic.
 - Expose health checks and a minimal frontend API surface for prompt/agent lifecycle.
 
+## Hardening (Step 17)
+
+- **Liveness vs. readiness:** `GET /api/health` proves the process is up and
+  never touches dependencies; `GET /api/health/ready` reports per-dependency
+  checks (`model`, `database`, `audit_queue`, `agent_runner`) and answers 503
+  with the same body shape while any of them is degraded.
+- **Error taxonomy (`api/errors.py`):** every non-2xx JSON response carries
+  `{code, message, request_id, detail}`. Codes include `validation_error`,
+  `governance_rejected`, `generation_timeout`, `generation_failed`, `busy`,
+  `not_found`, `conflict`, `unavailable`, and `internal_error`. Responses
+  never leak stack traces, exception text, or file paths — those go to the
+  process log keyed by the `request_id` echoed in the `X-Request-ID` header.
+- **Guards:** startup validation aborts boot with one aggregated, actionable
+  message on any misconfiguration; every `LlamaRuntime.generate()` call has a
+  configurable timeout; the busy guard 503s new prompts once the generation
+  queue exceeds `LLM_MAX_QUEUE_DEPTH`; agents are bounded by
+  `AGENT_TIMEOUT_SECONDS` and `AGENT_MAX_STEPS`; a llama.cpp crash marks the
+  runtime unhealthy (reported by readiness) and self-heals on the next
+  successful generation.
+- **WebSocket resilience:** the server heartbeats `/ws` every
+  `WS_HEARTBEAT_SECONDS` so dead connections are reaped, and an overflowed
+  subscriber's next event carries `degraded: true` so the client resyncs
+  from a fresh snapshot.
+
 ## Governance and Runtime Integration
 
 The API service applies request governance as part of prompt intake. Governance responsibilities include:

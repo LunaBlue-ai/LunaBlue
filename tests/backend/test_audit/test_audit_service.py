@@ -137,14 +137,36 @@ async def test_record_is_nonblocking_and_failures_stay_off_request_path(
     assert any("r-doomed" in r.message for r in caplog.records)
 
 
-async def test_overflow_drops_oldest(caplog):
-    """When the bounded queue is full the oldest event is logged and dropped."""
+async def test_overflow_drops_oldest_with_one_aggregate_warning(caplog):
+    """When the bounded queue is full the oldest events are dropped, and
+    sustained overflow logs ONE aggregate ERROR per interval (Step 17)
+    instead of per-event spam; individual payloads remain at DEBUG."""
     service = AuditService(max_queue_size=2)  # consumer never started
-    with caplog.at_level(logging.ERROR, logger="app.audit.service"):
+    with caplog.at_level(logging.DEBUG, logger="app.audit.service"):
         service.record_agent_event("agent-1", "first")
         service.record_agent_event("agent-2", "second")
-        service.record_agent_event("agent-3", "third")
-    assert any("queue full" in r.message for r in caplog.records)
-    assert any("agent-1" in r.message for r in caplog.records)
+        for i in range(3, 8):  # five drops in one burst
+            service.record_agent_event(f"agent-{i}", "more")
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "queue full" in r.message
+    ]
+    assert len(errors) == 1  # the first drop reports; the burst aggregates
+    # Every individual drop stays visible at DEBUG.
+    debugs = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and "dropped oldest" in r.message
+    ]
+    assert len(debugs) == 5
+    assert any("agent-1" in r.message for r in debugs)
+
+    # Introspection for readiness: totals and saturation are exposed.
+    assert service.dropped_total == 5
+    assert service.saturated
+    assert service.queue_depth == service.queue_capacity == 2
+
+    # Drop-oldest semantics: the two newest events survive.
     remaining = [service._queue.get_nowait().agent_id for _ in range(2)]
-    assert remaining == ["agent-2", "agent-3"]
+    assert remaining == ["agent-6", "agent-7"]

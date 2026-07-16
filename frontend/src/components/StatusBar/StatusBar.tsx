@@ -13,16 +13,24 @@ const LIVE_LABELS = {
   disconnected: "Disconnected",
 } as const;
 
-/** Model readiness, from GET /api/health/ready (Step 15). */
+/** Model readiness, from GET /api/health/ready (Step 15; Step 17 adds the
+ * unhealthy state — loaded but the last generation crashed). */
 const MODEL_LABELS = {
   unknown: "Model —",
   loaded: "Model ready",
   not_loaded: "Model not loaded",
+  unhealthy: "Model unhealthy",
 } as const;
 
 export function StatusBar() {
-  const { connectivity, sessionId, wsStatus, agents, modelStatus } =
-    useAppState();
+  const {
+    connectivity,
+    sessionId,
+    wsStatus,
+    agents,
+    modelStatus,
+    readinessIssues,
+  } = useAppState();
   const liveMode =
     wsStatus === "open"
       ? "live"
@@ -40,6 +48,14 @@ export function StatusBar() {
       <span className={`status-model model-${modelStatus}`}>
         {MODEL_LABELS[modelStatus]}
       </span>
+      {readinessIssues.length > 0 && (
+        <span
+          className="status-degraded"
+          title={`Failing readiness checks: ${readinessIssues.join(", ")}`}
+        >
+          Degraded: {readinessIssues.join(", ")}
+        </span>
+      )}
       <span
         className={`status-agents${activeAgents > 0 ? " agents-active" : ""}`}
         title="Background agents currently pending or running"

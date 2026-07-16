@@ -59,3 +59,27 @@ curl http://localhost:8000/api/health
 ```
 
 Expected response: `{"service":"lunablue","version":"0.1.0","status":"ok"}`
+
+`/api/health` is liveness only (the process is up). Dependency readiness —
+database reachable, model loaded and healthy, audit queue not overflowing,
+agent runner alive — is reported per-check by:
+
+```bash
+curl http://localhost:8000/api/health/ready
+```
+
+which answers 503 (same body shape, with a `checks` breakdown) while any
+dependency is degraded. Startup fails fast: invalid settings (missing model
+file, malformed `DATABASE_URL`, out-of-range limits, bad redaction regexes)
+abort boot with one aggregated, actionable message.
+
+## Operations
+
+- **Error shape:** every non-2xx API response carries
+  `{code, message, request_id, detail}`; the `X-Request-ID` header correlates
+  responses with server logs. See `docs/Components/API.md` (Hardening).
+- **Audit retention & redaction:** `scripts/retention[.ps1|.sh] [--dry-run]`
+  deletes audit rows older than the configured window
+  (`AUDIT_RETENTION_DAYS`); `AUDIT_REDACTION_ENABLED=true` masks secrets/PII
+  before audit rows are written. Both are documented in
+  [docs/DataRetention.md](../docs/DataRetention.md).

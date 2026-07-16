@@ -5,7 +5,37 @@ import { AgentPanel } from "./components/AgentPanel";
 import { Chat } from "./components/Chat";
 import { StatusBar } from "./components/StatusBar";
 import { useWebSocket } from "./hooks/useWebSocket";
-import { isActiveAgent, useAppDispatch, useAppState } from "./state/AppState";
+import {
+  isActiveAgent,
+  useAppDispatch,
+  useAppState,
+  type ModelStatus,
+} from "./state/AppState";
+
+/** Readiness can change at runtime (Step 17); refresh it on this cadence. */
+const READINESS_POLL_MS = 15_000;
+
+/** Model state from a readiness body, preferring the Step 17 checks. */
+function modelStatusOf(readiness: ReadinessStatus): ModelStatus {
+  if (readiness.model === "not_loaded") {
+    return "not_loaded";
+  }
+  if (readiness.checks?.model && !readiness.checks.model.ok) {
+    return "unhealthy";
+  }
+  return "loaded";
+}
+
+/** Names of the readiness checks currently failing. */
+function readinessIssuesOf(readiness: ReadinessStatus): string[] {
+  if (!readiness.checks) {
+    // Pre-Step-17 body: only the overall verdict is known.
+    return readiness.status === "ok" ? [] : ["backend"];
+  }
+  return Object.entries(readiness.checks)
+    .filter(([, check]) => !check.ok)
+    .map(([name]) => name);
+}
 
 export default function App() {
   const dispatch = useAppDispatch();

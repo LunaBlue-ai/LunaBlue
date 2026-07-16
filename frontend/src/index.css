@@ -522,6 +522,23 @@ body {
   color: var(--error);
 }
 
+.model-unhealthy {
+  color: var(--error);
+  font-weight: 600;
+}
+
+/* Failing readiness checks (Step 17), e.g. "Degraded: database". */
+.status-degraded {
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--error);
+  border-radius: 999px;
+  color: var(--error);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-agents.agents-active {
   color: var(--accent);
   font-weight: 600;

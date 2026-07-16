@@ -161,3 +161,88 @@ def test_ws_disabled_rejects_the_handshake(client, monkeypatch):
 def test_plain_http_request_to_ws_stays_a_json_404(client):
     resp = client.get("/ws")
     assert resp.status_code == 404
+
+
+# -- Step 17 resilience ------------------------------------------------------------
+
+
+def test_heartbeat_pings_flow_while_idle(tmp_path, monkeypatch):
+    monkeypatch.setenv("WS_HEARTBEAT_SECONDS", "0.05")
+    get_settings.cache_clear()
+    runtime, _ = make_runtime(tmp_path)
+    app = make_app(FakeAuditService(), runtime)
+    app.router.lifespan_context = _noop_lifespan
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            assert ws.receive_json()["type"] == "snapshot"
+            # No store activity at all: only the heartbeat can be talking.
+            ping = ws.receive_json()
+            assert ping["type"] == "ping"
+            assert isinstance(ping["ts"], str)
+            assert ws.receive_json()["type"] == "ping"  # keeps coming
+
+
+def test_heartbeat_disabled_at_zero_stays_silent(tmp_path, monkeypatch):
+    monkeypatch.setenv("WS_HEARTBEAT_SECONDS", "0")
+    get_settings.cache_clear()
+    runtime, _ = make_runtime(tmp_path)
+    app = make_app(FakeAuditService(), runtime)
+    app.router.lifespan_context = _noop_lifespan
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()  # snapshot
+            time.sleep(0.15)
+            # The next frame is store-driven, not a ping.
+            client.post("/api/prompt", json={"text": "hello"})
+            assert ws.receive_json()["type"] != "ping"
+
+
+def test_overflowed_subscriber_gets_degraded_flag_once(tmp_path):
+    """When the bus drops events for a slow client, the next delivered
+    message carries degraded=true exactly once, then the slate is clean."""
+    import asyncio
+
+    from app.api.websocket import _stream_events
+    from app.state.events import EventBus
+    from app.state.store import StateStore
+
+    class CollectingSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send_json(self, message):
+            self.sent.append(message)
+
+    async def scenario():
+        bus = EventBus(max_queue=2)
+        store = StateStore(notify=bus.publish)
+        subscription = bus.subscribe()
+        socket = CollectingSocket()
+
+        # Nobody consuming while 4 events arrive: the first two roll off and
+        # the subscription is marked degraded.
+        for _ in range(4):
+            await store.touch_session("s1")
+        assert subscription.degraded
+
+        sender = asyncio.create_task(
+            _stream_events(socket, subscription, after_seq=0)
+        )
+        async with asyncio.timeout(2):
+            while len(socket.sent) < 2:
+                await asyncio.sleep(0.005)
+
+        # Two more events after the drops: delivered clean.
+        await store.touch_session("s1")
+        async with asyncio.timeout(2):
+            while len(socket.sent) < 3:
+                await asyncio.sleep(0.005)
+        sender.cancel()
+
+        first, second, third = socket.sent
+        assert first.get("degraded") is True  # the resync signal
+        assert "degraded" not in second
+        assert "degraded" not in third
+        await subscription.aclose()
+
+    asyncio.run(scenario())

@@ -73,13 +73,21 @@ async def test_api_routes_win_over_the_catch_all(client):
 async def test_unknown_api_path_is_a_json_404_not_the_spa(client):
     resp = await client.get("/api/nope")
     assert resp.status_code == 404
-    assert resp.json() == {"detail": "Not Found"}
+    body = resp.json()
+    # Step 17 error envelope: code/message/request_id, detail kept for
+    # backward compatibility.
+    assert body["detail"] == "Not Found"
+    assert body["code"] == "not_found"
+    assert body["message"] == "Not Found"
+    assert body["request_id"]
 
 
 async def test_post_to_an_unknown_api_path_is_still_a_json_404(client):
     resp = await client.post("/api/nope", json={})
     assert resp.status_code == 404
-    assert resp.json() == {"detail": "Not Found"}
+    body = resp.json()
+    assert body["detail"] == "Not Found"
+    assert body["code"] == "not_found"
 
 
 async def test_post_to_a_frontend_path_is_a_405(client):
@@ -91,7 +99,9 @@ async def test_post_to_a_frontend_path_is_a_405(client):
 async def test_unknown_ws_path_is_a_json_404_not_the_spa(client):
     resp = await client.get("/ws/nope")
     assert resp.status_code == 404
-    assert resp.json() == {"detail": "Not Found"}
+    body = resp.json()
+    assert body["detail"] == "Not Found"
+    assert body["code"] == "not_found"
 
 
 async def test_path_traversal_cannot_escape_the_static_dir(bundle_dir, client):

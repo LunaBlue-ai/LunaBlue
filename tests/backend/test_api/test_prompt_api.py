@@ -366,3 +366,108 @@ async def test_full_audit_chain_lands_in_postgres(tmp_path, audit_service):
         ]
         # Timestamps are consistent: response follows the request.
         assert response.timestamp >= row.timestamp
+
+
+# -- Step 17 hardening -----------------------------------------------------------
+
+
+async def test_busy_guard_returns_fast_503_with_busy_code(audit, runtime_and_fake):
+    """With the queue over its configured backlog, new submissions get an
+    immediate 503 (code="busy") and nothing is registered or audited."""
+    runtime, fake = runtime_and_fake
+    fake.block_seconds = 0.2
+    async with make_client(audit, runtime, max_queue_depth=1) as client:
+        first = asyncio.create_task(
+            client.post("/api/prompt", json={"text": "occupies the model"})
+        )
+        # Wait until the first generation actually holds the runtime.
+        async with asyncio.timeout(2):
+            while runtime.queue_depth == 0:
+                await asyncio.sleep(0.005)
+
+        started = asyncio.get_running_loop().time()
+        busy = await client.post("/api/prompt", json={"text": "rejected"})
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert busy.status_code == 503
+        body = busy.json()
+        assert body["code"] == "busy"
+        assert body["request_id"]
+        assert "try again" in body["message"]
+        assert busy.headers["retry-after"] == "5"
+        assert elapsed < 0.15  # fast rejection, not queued behind the model
+
+        first_resp = await first
+        assert first_resp.status_code == 200
+
+    # The rejected submission left no trace: one request chain, not two.
+    assert len(audit.prompt_requests) == 1
+    assert audit.prompt_requests[0]["raw_prompt"] == "occupies the model"
+
+
+async def test_generation_failure_carries_generation_failed_code(
+    audit, runtime_and_fake
+):
+    runtime, fake = runtime_and_fake
+    async with make_client(audit, runtime) as client:
+        fake.fail_with = RuntimeError("kaboom")
+        resp = await client.post("/api/prompt", json={"text": "hello"})
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert body["code"] == "generation_failed"
+    assert body["request_id"]
+    assert "kaboom" not in body["message"]  # internals stay in the audit log
+
+
+async def test_generation_timeout_carries_generation_timeout_code(
+    audit, runtime_and_fake
+):
+    runtime, fake = runtime_and_fake
+    async with make_client(audit, runtime, timeout=0.05) as client:
+        fake.block_seconds = 0.3
+        resp = await client.post("/api/prompt", json={"text": "slow"})
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert body["code"] == "generation_timeout"
+        await asyncio.sleep(0.4)  # drain the abandoned generation
+
+
+async def test_governance_rejection_uses_the_error_envelope(strict_client, audit):
+    resp = await strict_client.post("/api/prompt", json={"text": _INJECTION_TEXT})
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] == "governance_rejected"
+    assert body["message"] == body["detail"]  # legacy alias preserved
+    assert "override" in body["message"]
+    assert body["request_id"]
+
+
+async def test_validation_error_envelope_keeps_field_details(client):
+    resp = await client.post("/api/prompt", json={"text": ""})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "validation_error"
+    assert body["message"]
+    assert body["request_id"]
+    # detail stays the FastAPI field-error list the frontend understands...
+    assert isinstance(body["detail"], list)
+    assert all("msg" in entry and "loc" in entry for entry in body["detail"])
+    # ...but never echoes the offending input back.
+    assert all("input" not in entry for entry in body["detail"])
+
+
+async def test_every_response_echoes_a_request_id_header(client):
+    ok = await client.post("/api/prompt", json={"text": "hi"})
+    assert ok.headers["x-request-id"]
+
+    supplied = await client.get(
+        "/api/health", headers={"X-Request-ID": "trace-me-42"}
+    )
+    assert supplied.headers["x-request-id"] == "trace-me-42"
+
+    hostile = await client.get(
+        "/api/health", headers={"X-Request-ID": "x" * 500}
+    )
+    assert hostile.headers["x-request-id"] != "x" * 500  # replaced, not echoed

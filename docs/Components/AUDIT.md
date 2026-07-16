@@ -19,8 +19,11 @@ This component lives in the `backend/app/audit/` package defined in [Architectur
 - `db.py` — SQLAlchemy engine and session management; the engine is created in the `main.py` lifespan handler.
 - `models.py` — SQLAlchemy tables: `prompt_requests`, `prompt_responses`, `agent_events`, `sessions`.
 - `service.py` — structured audit writer, decoupled from the request path.
+- `redaction.py` — regex-based masking of secrets/PII applied before audit writes (Step 17; see [DataRetention.md](../DataRetention.md)).
+- `retention.py` — deletes audit rows older than the configured per-table window; invoked by `scripts/retention`.
 - `backend/migrations/` — Alembic migrations for the audit/state schema (`alembic.ini` at the backend root); the schema is owned by the Python service.
 - `scripts/migrate` — runs Alembic migrations against Postgres; `docker-compose.yml` provides a local Postgres for development.
+- `scripts/retention` — applies the retention policy (supports `--dry-run`); schedule with cron / Task Scheduler.
 
 ## Build Approach
 
@@ -38,3 +41,4 @@ This component lives in the `backend/app/audit/` package defined in [Architectur
 - Separate tables or event types for prompt requests, prompt responses, and agent actions.
 - Store enough context for replay and debugging without requiring full session reconstruction.
 - Encrypt or redact sensitive prompt data if the system handles private inputs.
+- Data retention and privacy safeguards (redaction and per-table retention windows, both configuration-driven) are documented in [DataRetention.md](../DataRetention.md).

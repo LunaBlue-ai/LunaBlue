@@ -14,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from app.audit import db
 from app.llm.runtime import (
     GenerationResult,
+    GenerationTimeoutError,
     LlamaRuntime,
     ModelNotFoundError,
     load_system_prompt,
@@ -150,6 +151,60 @@ def test_model_info_and_loaded_flag(tmp_path):
 def test_system_prompt_template_loads():
     text = load_system_prompt()
     assert "LunaBlue" in text
+
+
+# -- Step 17 guards -------------------------------------------------------------
+
+
+async def test_generation_timeout_fails_cleanly_and_next_call_succeeds(tmp_path):
+    runtime, fake = make_runtime(tmp_path, generation_timeout_seconds=0.05)
+    fake.block_seconds = 0.2
+
+    with pytest.raises(GenerationTimeoutError) as exc_info:
+        await runtime.generate("slow")
+    assert "0.1s" in str(exc_info.value) or "0.0s" in str(exc_info.value)
+    # A timeout is not a crash: the model stays healthy.
+    assert runtime.healthy
+
+    # The abandoned thread holds the lock until it finishes; the next call
+    # queues behind it and then succeeds — never a concurrent entry.
+    fake.block_seconds = 0.0
+    result = await runtime.generate("next")
+    assert result.text == "echo: next"
+    assert not fake.concurrent_entry
+
+
+async def test_model_crash_marks_runtime_unhealthy_and_success_heals(tmp_path):
+    runtime, fake = make_runtime(tmp_path)
+    assert runtime.healthy
+
+    fake.fail_with = RuntimeError("llama.cpp exploded")
+    with pytest.raises(RuntimeError, match="exploded"):
+        await runtime.generate("boom")
+    assert not runtime.healthy
+    assert "exploded" in runtime.last_error
+    assert runtime.model_info["healthy"] is False
+
+    # The runtime still accepts calls; a successful generation self-heals.
+    fake.fail_with = None
+    await runtime.generate("recovered")
+    assert runtime.healthy
+    assert runtime.last_error is None
+
+
+async def test_queue_depth_counts_in_flight_and_queued_calls(tmp_path):
+    runtime, fake = make_runtime(tmp_path)
+    assert runtime.queue_depth == 0
+    fake.block_seconds = 0.05
+
+    first = asyncio.create_task(runtime.generate("one"))
+    await asyncio.sleep(0.01)  # first is in flight
+    second = asyncio.create_task(runtime.generate("two"))
+    await asyncio.sleep(0.01)  # second queued behind it
+    assert runtime.queue_depth == 2
+
+    await asyncio.gather(first, second)
+    assert runtime.queue_depth == 0
 
 
 # -- HTTP surface -------------------------------------------------------------
