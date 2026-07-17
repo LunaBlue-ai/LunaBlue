@@ -7,10 +7,11 @@ against the models' metadata.
 
 import asyncio
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
 from sqlalchemy import pool
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.audit.models import Base
@@ -25,11 +26,27 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    # -x db_url=... overrides settings, e.g. for one-off runs against
-    # another database.
-    return context.get_x_argument(as_dictionary=True).get(
-        "db_url", get_settings().database_url
-    )
+    # Precedence: -x db_url=... (CLI one-offs, tests) > config.attributes
+    # (the app lifespan's programmatic upgrade, Step 21) > settings.
+    x_url = context.get_x_argument(as_dictionary=True).get("db_url")
+    if x_url:
+        return x_url
+    attr_url = config.attributes.get("db_url")
+    if attr_url:
+        return attr_url
+    return get_settings().resolved_database_url
+
+
+def _ensure_sqlite_parent_dir(url: str) -> None:
+    """Create the database file's parent directory for SQLite URLs.
+
+    Migrations may be the first thing that ever touches the database (fresh
+    checkout, standalone retention run), so the data directory cannot be
+    assumed to exist.
+    """
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite" and parsed.database:
+        Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
 
 
 def run_migrations_offline() -> None:
@@ -60,7 +77,9 @@ def _run_migrations(connection: Connection) -> None:
 async def run_migrations_online() -> None:
     """Run migrations over the async engine."""
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = _database_url()
+    url = _database_url()
+    _ensure_sqlite_parent_dir(url)
+    configuration["sqlalchemy.url"] = url
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",

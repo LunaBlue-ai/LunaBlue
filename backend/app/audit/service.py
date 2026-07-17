@@ -4,7 +4,8 @@ Callers (routes, graph nodes) emit typed events through the ``record_*``
 methods, which enqueue onto a bounded in-memory queue and return immediately —
 no DB round-trip ever happens on the caller's path. A single background
 consumer task (started/stopped by the ``main.py`` lifespan handler) drains the
-queue and writes batches to Postgres using its own sessions.
+queue and writes batches to the SQLite audit database using its own
+sessions.
 
 Failure policy:
 
@@ -16,7 +17,7 @@ Failure policy:
   When full, the *oldest* queued event is dropped to make room for the
   incoming one — under sustained backpressure the most recent events are the
   ones worth keeping for live debugging. Sustained overflow (e.g. a long
-  Postgres outage) is reported as one aggregate ERROR per
+  database outage) is reported as one aggregate ERROR per
   ``drop_log_interval`` seconds rather than per-event spam (Step 17); every
   individual drop is still visible at DEBUG, and readiness surfaces the
   saturation via :attr:`AuditService.saturated`.
@@ -24,7 +25,7 @@ Failure policy:
 Redaction (Step 17): when a :class:`~app.audit.redaction.Redactor` is
 attached, prompt and output text fields are masked on the producer side —
 before the event is even enqueued — so unredacted text never sits in the
-queue or reaches Postgres.
+queue or reaches the database.
 """
 
 import asyncio
@@ -37,7 +38,7 @@ from typing import Any
 
 from fastapi import Request
 from sqlalchemy import insert, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.audit import db, models
 from app.audit.redaction import Redactor
@@ -241,7 +242,7 @@ class AuditService:
     ) -> list[AgentEvent]:
         """The most recent ``agent_events`` rows for one agent, oldest first.
 
-        Reads go straight to Postgres and deliberately do not wait for the
+        Reads go straight to the database and deliberately do not wait for the
         write queue to drain: a just-emitted event may lag by one consumer
         batch, which is acceptable for status views and keeps this read path
         immune to write-side backpressure.
@@ -290,7 +291,7 @@ class AuditService:
     def _note_drop(self, dropped: AuditEvent) -> None:
         """Account for one overflow drop; report in aggregate (Step 17).
 
-        Under a sustained Postgres outage the queue overflows on every event;
+        Under a sustained database outage the queue overflows on every event;
         one ERROR per ``drop_log_interval`` summarizing the count replaces
         the per-event spam, while DEBUG keeps the individual payloads.
         """
@@ -327,7 +328,7 @@ class AuditService:
 
         Events enqueued before ``close`` sit ahead of the stop sentinel and
         are written (or logged as failed) before the consumer exits. If the
-        drain exceeds ``timeout`` (e.g. Postgres is hanging), the consumer is
+        drain exceeds ``timeout`` (e.g. the database is hanging), the consumer is
         cancelled and remaining events are lost with an error log.
         """
         if self._closed:
@@ -408,7 +409,7 @@ class AuditService:
             case SessionEvent():
                 # The mapped attribute is ``meta``: ``metadata`` would resolve
                 # to the declarative class's MetaData, not the column.
-                stmt = pg_insert(models.Session).values(
+                stmt = sqlite_insert(models.Session).values(
                     session_id=event.session_id,
                     user_id=event.user_id,
                     created_at=event.timestamp,

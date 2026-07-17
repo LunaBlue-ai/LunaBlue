@@ -279,6 +279,7 @@ async def test_readiness_reports_model_state(tmp_path):
 async def test_health_liveness_answers_while_generation_runs(tmp_path):
     runtime, fake = make_runtime(tmp_path)
     fake.block_seconds = 0.2
+    fake.queued_responses = ["busy"]  # enhancement call passes through
     app = make_app(FakeAuditService(), runtime)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"

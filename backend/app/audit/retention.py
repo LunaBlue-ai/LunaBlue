@@ -132,7 +132,12 @@ async def _main(argv: list[str] | None = None) -> int:
         return 1
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    db.init_engine(settings.database_url)
+    # Retention can run standalone before the app ever booted: make sure the
+    # database directory exists (SQLite creates the file on first connect).
+    db_path = settings.resolved_database_path
+    if db_path is not None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    db.init_engine(settings.resolved_database_url)
     try:
         affected = await apply_retention(windows=windows, dry_run=args.dry_run)
     finally:

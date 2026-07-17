@@ -160,7 +160,7 @@ class AgentRunner:
         agents (auditing each as cancelled), then stop the workers.
 
         Runs before ``AuditService.close`` in the lifespan so every
-        cancellation event still reaches Postgres.
+        cancellation event still reaches the audit database.
         """
         if self._closed:
             return

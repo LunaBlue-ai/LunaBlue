@@ -1,6 +1,7 @@
 """Tests for the audit retention policy (Step 17, ``app/audit/retention.py``).
 
-These run against the docker-compose test Postgres via ``audit_db`` (skipped
+These run against the suite's temp-file SQLite database via ``audit_db``
+(always available
 with instructions when unreachable): rows are seeded on both sides of the
 window and only the old ones may go.
 """

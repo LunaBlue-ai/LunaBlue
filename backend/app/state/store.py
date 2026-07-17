@@ -4,7 +4,7 @@ runtime state (Step 10).
 :class:`StateStore` tracks active sessions, in-flight prompt runs, and (from
 Step 14) background agents with their task queues. It is *live* state only:
 finished runs and settled agents are retained for a bounded window and then
-evicted — the Postgres audit chain is the durable record
+evicted — the SQLite audit chain is the durable record
 (docs/Architecture.md).
 
 Concurrency model: mutations are async methods serialized by one
@@ -32,12 +32,15 @@ logger = logging.getLogger(__name__)
 
 # Every phase a prompt run moves through, in nominal order. The pipeline owns
 # received/governance and the terminal transitions; the graph node wrappers
-# (orchestration/graph.py) own engineering/reviewing/spawning/responding.
-# ``spawning`` only appears on runs the review routed through agent_spawn.
+# (orchestration/graph.py) own engineering/enhancing/reviewing/spawning/
+# responding. ``spawning`` only appears on runs the review routed through
+# agent_spawn; ``enhancing`` only when the closed-loop enhancement node is
+# registered (enhancement or session summary enabled).
 RUN_PHASES = (
     "received",
     "governance",
     "engineering",
+    "enhancing",
     "reviewing",
     "spawning",
     "responding",
@@ -212,6 +215,10 @@ class _SessionRecord:
     created_at: datetime
     last_activity_at: datetime
     run_ids: list[str] = field(default_factory=list)  # oldest first
+    # Internal rolling chat summary (closed-loop prompt processing).
+    # Deliberately excluded from SessionSnapshot so it can never reach a wire
+    # payload — reads go through StateStore.get_session_summary only.
+    summary: str = ""
 
     def snapshot(self) -> SessionSnapshot:
         return SessionSnapshot(
@@ -383,6 +390,26 @@ class StateStore:
         self._emit([StoreEvent("session_updated", snapshot)])
         return snapshot
 
+    async def set_session_summary(self, session_id: str, summary: str) -> None:
+        """Replace a session's internal rolling chat summary.
+
+        Upserts the session if unknown. Emits nothing and leaves
+        ``last_activity_at`` alone: the summary is not part of the session's
+        public view, so nothing observable changed.
+        """
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                now = _utcnow()
+                session = _SessionRecord(
+                    session_id=session_id,
+                    user_id=None,
+                    created_at=now,
+                    last_activity_at=now,
+                )
+                self._sessions[session_id] = session
+            session.summary = summary
+
     # -- agent mutations (driven by orchestration/runner.py, Step 14) -------------
 
     async def register_agent(
@@ -546,6 +573,17 @@ class StateStore:
         """Snapshot of one session, or ``None`` if unknown."""
         session = self._sessions.get(session_id)
         return None if session is None else session.snapshot()
+
+    def get_session_summary(self, session_id: str) -> str | None:
+        """Internal rolling chat summary, or ``None`` if unknown/empty.
+
+        Never exposed via snapshots or the status APIs — this is the only
+        read path for the summary.
+        """
+        session = self._sessions.get(session_id)
+        if session is None or not session.summary:
+            return None
+        return session.summary
 
     def session_runs(
         self, session_id: str, *, limit: int = 20

@@ -3,7 +3,7 @@
 Read-only views over the in-memory :class:`~app.state.store.StateStore`:
 routing only — snapshots come straight from the store, so polling here never
 contends with graph execution. Evicted (old) runs 404 here while remaining
-fully present in the Postgres audit record; Step 13 adds WebSocket streaming
+fully present in the audit database; Step 13 adds WebSocket streaming
 of the same state.
 """
 
@@ -11,7 +11,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.api.schemas.state import RunStatus, SessionStatus
+from app.api.schemas.state import RunStatus, SessionStatus, SummaryResetResponse
+from app.orchestration.summarizer import SessionSummarizer
 from app.state.store import StateStore
 
 router = APIRouter()
@@ -26,6 +27,12 @@ _SESSION_NOT_FOUND = "Unknown session id."
 def get_state_store(request: Request) -> StateStore:
     """FastAPI dependency: the process-wide state store built in the lifespan."""
     return request.app.state.state_store
+
+
+def get_session_summarizer(request: Request) -> SessionSummarizer | None:
+    """FastAPI dependency: the summarizer, or ``None`` when the session
+    summary feature is disabled."""
+    return request.app.state.session_summarizer
 
 
 @router.get(
@@ -80,3 +87,35 @@ async def get_session_status(
             for run in store.session_runs(session_id, limit=limit)
         ],
     )
+
+
+@router.post(
+    "/sessions/{session_id}/summary/reset",
+    response_model=SummaryResetResponse,
+    summary="Clear the session's internal rolling chat summary",
+    description=(
+        "Idempotent. Clears the accumulated conversational context so it no "
+        "longer influences future responses; the pinned identity fields are "
+        "unaffected — they live outside the rolling buffer and are re-"
+        "injected on the next prompt. Unknown sessions return cleared=false "
+        "(a frontend session may not exist server-side until its first "
+        "prompt). In-flight background summary updates are invalidated and "
+        "cannot resurrect the cleared summary."
+    ),
+)
+async def reset_session_summary(
+    session_id: str,
+    store: Annotated[StateStore, Depends(get_state_store)],
+    summarizer: Annotated[
+        SessionSummarizer | None, Depends(get_session_summarizer)
+    ],
+) -> SummaryResetResponse:
+    if store.get_session(session_id) is None:
+        # Unknown session: no runs, so no scheduled summaries either. Avoid
+        # upserting a phantom session just to clear nothing.
+        return SummaryResetResponse(session_id=session_id, cleared=False)
+    if summarizer is not None:
+        await summarizer.reset(session_id)
+    else:
+        await store.set_session_summary(session_id, "")
+    return SummaryResetResponse(session_id=session_id, cleared=True)

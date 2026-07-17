@@ -9,7 +9,7 @@ This component is the core service container for LunaBlue. It hosts the React fr
 - serve the React frontend as static assets
 - receive prompt submissions and agent status requests
 - validate, normalize, and govern incoming prompts
-- log incoming prompt requests and prompt responses to Postgres
+- log incoming prompt requests and prompt responses to the SQLite audit database
 - host the main LangGraph orchestrator and background agent runners
 - maintain shared in-memory state for sessions and agents
 - optionally push state updates to the UI via WebSockets
@@ -21,12 +21,12 @@ This component lives under `backend/` in the repository layout defined in [Archi
 
 - `main.py` — app factory; the lifespan handler loads config, creates the SQLAlchemy engine, instantiates the global llama.cpp runtime once, initializes the state store, then mounts routes and static files.
 - `config.py` — pydantic-settings: model path, DB URL, WebSocket options, governance flags, guard limits; `startup.py` validates them fail-fast at boot.
-- `api/` — HTTP/WS surface, routing only: `routes/prompt.py` (POST `/api/prompt`), `routes/agents.py` (GET `/api/agents`, GET `/api/agents/{id}`, POST `/api/agents/{id}/cancel`), `routes/state.py` (GET `/api/runs/{request_id}`, GET `/api/sessions/{session_id}` — the polling fallback), `routes/health.py` (`/api/health`, `/api/health/ready`), `websocket.py` (`/ws`), `errors.py` (error taxonomy), and Pydantic `schemas/`.
+- `api/` — HTTP/WS surface, routing only: `routes/prompt.py` (POST `/api/prompt`), `routes/agents.py` (GET `/api/agents`, GET `/api/agents/{id}`, POST `/api/agents/{id}/cancel`), `routes/state.py` (GET `/api/runs/{request_id}`, GET `/api/sessions/{session_id}` — the polling fallback — and POST `/api/sessions/{session_id}/summary/reset`, the idempotent chat-summary reset returning `{session_id, cleared}`), `routes/identity.py` (GET/PUT `/api/identity` — the five identity fields pinned into the injected chat summary; PUT is a full replace, 200 chars max per field), `routes/health.py` (`/api/health`, `/api/health/ready`), `websocket.py` (`/ws`), `errors.py` (error taxonomy), and Pydantic `schemas/`.
 - `governance/` — prompt intake: `intake.py` (normalization and enrichment), `policy.py` (policy tags, safety directives).
-- `orchestration/` — `graph.py` (main request graph), `pipeline.py` (runs the graph for one prompt: state updates + audit events per phase), `nodes/` (prompt engineering, LLM review, agent spawn, respond), `agents/` (background subgraphs; `research.py` is the built-in agent), `runner.py` (background execution / task queue).
+- `orchestration/` — `graph.py` (main request graph), `pipeline.py` (runs the graph for one prompt: state updates + audit events per phase), `nodes/` (prompt engineering, prompt enhancement, LLM review, agent spawn, respond), `agents/` (background subgraphs; `research.py` is the built-in agent), `runner.py` (background execution / task queue), `summarizer.py` (background rolling-summary maintenance per session — internal-only, never on the wire).
 - `llm/` — `runtime.py` holds the single global `llama-cpp-python` instance; `prompts/` holds templates. No other package touches llama.cpp directly.
-- `state/` — `store.py` (session, graph, and agent state + task queues), `events.py` (pub/sub bridge to WebSocket broadcasts).
-- `audit/` — Postgres integration; see [AUDIT.md](AUDIT.md).
+- `state/` — `store.py` (session, graph, and agent state + task queues), `events.py` (pub/sub bridge to WebSocket broadcasts), `identity.py` (identity fields pinned into the injected chat summary — stored outside the LLM-maintained rolling buffer so resets and re-summarization never drop them).
+- `audit/` — SQLite audit integration; see [AUDIT.md](AUDIT.md).
 - `static/` — built frontend output, copied in at build time (gitignored).
 
 ## Build Approach
@@ -37,8 +37,8 @@ This component lives under `backend/` in the repository layout defined in [Archi
 4. Implement initial prompt intake in `governance/` that performs prompt engineering and applies safety metadata.
 5. Instantiate a single global `llama.cpp` runtime with `llama-cpp-python` in `llm/runtime.py`, created once in the `main.py` lifespan handler.
 6. Implement the main LangGraph pipeline and long-running agent subgraphs in `orchestration/`.
-7. Maintain runtime state in memory in `state/store.py`; Postgres is the primary durable store, with local caches used only for performance.
-8. Persist prompt request/response audit data and governance metadata to Postgres via `audit/service.py`.
+7. Maintain runtime state in memory in `state/store.py`; the SQLite audit database is the primary durable store, with local caches used only for performance.
+8. Persist prompt request/response audit data and governance metadata to SQLite via `audit/service.py`.
 
 ## Implementation Notes
 
@@ -79,11 +79,11 @@ The API service applies request governance as part of prompt intake. Governance 
 
 - normalizing and enriching incoming prompt text
 - tagging requests with policy metadata and safety directives
-- logging the initial prompt and reviewed prompt to Postgres
+- logging the initial prompt and reviewed prompt to the audit database
 
 The API service then invokes the local LLM and LangGraph orchestrator, which:
 
 - performs initial prompt review and planning
 - spawns or updates background agents if needed
 - synthesizes final responses and updates shared state
-- logs prompt responses and final outputs to Postgres
+- logs prompt responses and final outputs to the audit database

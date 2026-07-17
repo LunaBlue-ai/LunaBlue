@@ -5,14 +5,13 @@ The suite runs on any machine without a GPU, a model file, or manual setup:
 - The LLM is always :class:`tests.backend.fakes.FakeLlamaRuntime`; importing
   ``llama_cpp`` anywhere during the run is a hard error (see the meta-path
   blocker below), so no test can accidentally depend on the real runtime.
-- Tests that need Postgres depend (directly or via ``audit_service``) on
-  :func:`audit_db`, which targets the throwaway docker-compose test database,
-  migrates it with Alembic once per session, and truncates the audit tables
-  after every test. Without Docker those tests skip with instructions; the
-  rest of the suite still runs.
+- Database tests (Step 21: SQLite) depend — directly or via
+  ``audit_service`` — on :func:`audit_db`, which targets a per-session
+  temp-file SQLite database, migrates it with Alembic once per session, and
+  deletes the audit rows after every test. SQLite ships with Python, so
+  these tests always run — there is no skip path.
 """
 
-import asyncio
 import os
 import sys
 from pathlib import Path
@@ -23,7 +22,6 @@ from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.audit import db
 from app.audit.service import AuditService
@@ -33,19 +31,6 @@ from tests.backend.fakes import FakeAuditService, FakeLlamaRuntime, make_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = REPO_ROOT / "backend"
-
-# The docker-compose `postgres-test` service (profile "test"). CI points this
-# at its own service container via the environment variable.
-TEST_DATABASE_URL = os.environ.get(
-    "LUNABLUE_TEST_DATABASE_URL",
-    "postgresql+asyncpg://lunablue_test:lunablue_test@localhost:55432/lunablue_test",
-)
-
-_POSTGRES_HINT = (
-    "Test Postgres unavailable — start it with "
-    "`docker compose --profile test up -d postgres-test` "
-    "(or point LUNABLUE_TEST_DATABASE_URL at a database)"
-)
 
 
 class _LlamaCppImportBlocker:
@@ -81,7 +66,7 @@ def fake_runtime() -> FakeLlamaRuntime:
 
 @pytest.fixture
 def fake_audit() -> FakeAuditService:
-    """In-memory audit recorder for tests that don't need Postgres."""
+    """In-memory audit recorder for tests that don't need the database."""
     return FakeAuditService()
 
 
@@ -118,61 +103,52 @@ def event_bus(state_store) -> EventBus:
     return bus
 
 
-# -- Postgres (audit) ----------------------------------------------------------
-
-
-def _probe_database() -> str | None:
-    """None when the test database answers, else the failure summary."""
-
-    async def probe() -> None:
-        engine = create_async_engine(TEST_DATABASE_URL)
-        try:
-            async with engine.connect():
-                pass
-        finally:
-            await engine.dispose()
-
-    try:
-        asyncio.run(probe())
-        return None
-    except Exception as exc:  # noqa: BLE001 - any failure means "skip"
-        return f"{type(exc).__name__}: {exc}"
+# -- SQLite (audit) ------------------------------------------------------------
 
 
 @pytest.fixture(scope="session")
-def migrated_database() -> str:
+def test_database_url(tmp_path_factory) -> str:
+    """URL of the suite's database: a per-session temp SQLite file.
+
+    ``LUNABLUE_TEST_DATABASE_URL`` still overrides it for one-off runs
+    against another database file.
+    """
+    override = os.environ.get("LUNABLUE_TEST_DATABASE_URL")
+    if override:
+        return override
+    path = tmp_path_factory.mktemp("db") / "test.db"
+    return f"sqlite+aiosqlite:///{path.as_posix()}"
+
+
+@pytest.fixture(scope="session")
+def migrated_database(test_database_url) -> str:
     """URL of the test database, migrated to Alembic head once per session."""
-    failure = _probe_database()
-    if failure is not None:
-        message = f"{_POSTGRES_HINT}. Probe failed: {failure}"
-        if os.environ.get("LUNABLUE_TEST_REQUIRE_DB"):
-            # CI provisions Postgres and must never silently skip these tests.
-            pytest.fail(message)
-        pytest.skip(message)
     config = Config()
     config.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
     # migrations/env.py reads -x db_url=... ahead of application settings.
-    config.cmd_opts = SimpleNamespace(x=[f"db_url={TEST_DATABASE_URL}"])
+    config.cmd_opts = SimpleNamespace(x=[f"db_url={test_database_url}"])
     command.upgrade(config, "head")
-    return TEST_DATABASE_URL
+    return test_database_url
 
 
 @pytest.fixture
 async def audit_db(migrated_database) -> str:
     """Bind the process-wide engine to the migrated test database for one
-    test; the audit tables are truncated afterwards so state never leaks."""
+    test; the audit rows are deleted afterwards so state never leaks."""
     db.init_engine(migrated_database)
     try:
         yield migrated_database
     finally:
         try:
+            # Children first: SQLite has no TRUNCATE ... CASCADE.
             async with db.session_scope() as session:
-                await session.execute(
-                    text(
-                        "TRUNCATE agent_events, prompt_responses, "
-                        "prompt_requests, sessions CASCADE"
-                    )
-                )
+                for table in (
+                    "agent_events",
+                    "prompt_responses",
+                    "prompt_requests",
+                    "sessions",
+                ):
+                    await session.execute(text(f"DELETE FROM {table}"))
         finally:
             await db.dispose_engine()
 

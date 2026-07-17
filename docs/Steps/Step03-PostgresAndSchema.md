@@ -1,5 +1,9 @@
 # Step 3 Prompt — Provision Postgres and the Schema
 
+> **Superseded by [Step 21](Step21-SqliteMigration.md):** the audit database
+> is now a file-based SQLite database (`data/lunablue.db`) — no Docker, no
+> Postgres. This document is kept as the historical build prompt.
+
 Use this prompt to execute Step 3 of [BuildPlan.md](../BuildPlan.md).
 
 ---

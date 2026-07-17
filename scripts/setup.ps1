@@ -1,6 +1,6 @@
 # One-shot development setup for LunaBlue (Step 18). Idempotent: safe to
 # re-run at any time; each step skips or redoes cleanly.
-#   1. Checks prerequisites (Python >= 3.11, Node >= 20, Docker) with
+#   1. Checks prerequisites (Python >= 3.11, Node >= 20) with
 #      actionable failure messages.
 #   2. Creates the Python venv at backend/.venv if missing.
 #   3. Installs the backend: pip install -e backend[dev], then the [llm]
@@ -62,17 +62,8 @@ if ($nodeMajor -lt 20) {
 }
 Write-Host "Node $nodeVersion  OK"
 
-# Docker CLI - needed for the Postgres audit store (docker compose).
-$docker = Get-Command docker -ErrorAction SilentlyContinue
-if (-not $docker) {
-    Fail "Docker not found. Install Docker Desktop from https://www.docker.com/products/docker-desktop/ and re-run. LunaBlue uses it for the Postgres audit database (docker compose up -d postgres)."
-}
-docker info *> $null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Docker CLI found, but the daemon is not running. Setup can continue; start Docker Desktop before 'docker compose up -d postgres'." -ForegroundColor Yellow
-} else {
-    Write-Host "Docker $((docker --version) -replace 'Docker version ', '' -replace ',.*', '')  OK"
-}
+# No database prerequisite (Step 21): the audit store is a local SQLite
+# file (data/lunablue.db) created automatically on first start.
 
 # -- [2/5] Python venv -------------------------------------------------------
 Step "[2/5] Python venv (backend/.venv)"
@@ -140,9 +131,8 @@ if (Test-Path $envFile) {
 
 Write-Host ""
 Write-Host "Setup complete. Next steps (from the repo root):" -ForegroundColor Green
-Write-Host "  1. docker compose up -d postgres"
-Write-Host "  2. scripts\migrate.ps1"
-Write-Host "  3. scripts\download_model.ps1     (~2.3 GB, one-time)"
-Write-Host "  4. scripts\build_frontend.ps1"
-Write-Host "  5. cd backend; .venv\Scripts\uvicorn app.main:app --port 8000"
-Write-Host "  6. open http://localhost:8000/"
+Write-Host "  1. scripts\download_model.ps1     (~2.3 GB, one-time)"
+Write-Host "  2. scripts\build_frontend.ps1"
+Write-Host "  3. cd backend; .venv\Scripts\uvicorn app.main:app --port 8000"
+Write-Host "  4. open http://localhost:8000/"
+Write-Host "The audit database (data\lunablue.db) is created automatically on first start."

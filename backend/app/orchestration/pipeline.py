@@ -3,9 +3,22 @@
 :class:`PromptPipeline` owns the full request flow — governance intake, the
 LangGraph main graph (Step 9), and the audit chain — so the route stays
 routing-only per docs/Components/API.md. Generation now runs through the
-graph in :mod:`app.orchestration.graph` (prompt engineering → LLM review →
-respond), which means **two LLM calls per request** (review + respond); the
-configured timeout bounds the whole graph run, not each call.
+graph in :mod:`app.orchestration.graph` (prompt engineering → prompt
+enhancement → LLM review → respond), which means up to **three foreground
+LLM calls per request** (enhance + review + respond); the configured timeout
+bounds the whole graph run, not each call.
+
+Closed-loop prompt processing: when a :class:`SessionSummarizer` is bound,
+the pipeline injects the session's rolling chat summary into the graph state
+before the run and schedules a background summary update (raw user prompt +
+response excerpt) after each successful run. Both the enhanced prompt and
+the summary are internal-only — never part of :class:`PipelineResult`.
+
+Step 20: the injected block is composed of the pinned identity fields
+(:class:`~app.state.identity.IdentityStore`, stored outside the rolling
+buffer so resets and re-summarization can never drop them) followed by the
+rolling summary, truncated from the rolling tail to stay within the summary
+character budget.
 
 Failure contract (unchanged from Step 8): prompts rejected by intake raise
 :class:`~app.governance.intake.PromptRejectedError` (audited here, mapped to
@@ -39,6 +52,8 @@ from app.governance.intake import IntakeContext, PromptIntake, PromptRejectedErr
 from app.llm.runtime import GenerationTimeoutError, LlamaRuntime
 from app.orchestration.graph import MainGraphState, build_main_graph
 from app.orchestration.runner import AgentRunner
+from app.orchestration.summarizer import SessionSummarizer
+from app.state.identity import IdentityStore, compose_summary
 from app.state.store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -134,6 +149,11 @@ class PromptPipeline:
         timeout_seconds: float,
         runner: AgentRunner | None = None,
         max_queue_depth: int = 0,
+        summarizer: SessionSummarizer | None = None,
+        enhancement_enabled: bool = True,
+        enhancement_max_tokens: int = 512,
+        identity: IdentityStore | None = None,
+        summary_max_chars: int = 2000,
     ) -> None:
         self._intake = intake
         self._runtime = runtime
@@ -143,10 +163,24 @@ class PromptPipeline:
         # Busy guard (Step 17): reject new prompts when this many generations
         # are already in flight or queued; 0 disables the guard.
         self._max_queue_depth = max_queue_depth
+        # Closed-loop prompt processing: a bound summarizer enables the
+        # rolling session summary (injection + background updates). Identity
+        # fields (Step 20) ride inside the injected summary, so they are
+        # deliberately gated with the summary feature.
+        self._summarizer = summarizer
+        self._identity = identity
+        self._summary_max_chars = summary_max_chars
         # Compiled once per process (the lifespan builds one pipeline); the
         # store bound here makes each node entry advance the run's phase, and
         # the runner (Step 14) enables the agent-spawn detour.
-        self._graph = build_main_graph(runtime, store, runner)
+        self._graph = build_main_graph(
+            runtime,
+            store,
+            runner,
+            enhancement_enabled=enhancement_enabled,
+            enhancement_max_tokens=enhancement_max_tokens,
+            summary_enabled=summarizer is not None,
+        )
 
     async def run(
         self,
@@ -221,6 +255,19 @@ class PromptPipeline:
             "governance": reviewed.governance,
             "decisions": [],
         }
+        if self._summarizer is not None:
+            # The injected block is the pinned identity fields (Step 20,
+            # never LLM-maintained, never truncated) plus the rolling
+            # summary, under one character budget.
+            identity_block = (
+                self._identity.format_block() if self._identity else ""
+            )
+            rolling = self._store.get_session_summary(session_id) or ""
+            combined = compose_summary(
+                identity_block, rolling, max_chars=self._summary_max_chars
+            )
+            if combined:
+                initial["chat_summary"] = combined
         started = time.perf_counter()
         try:
             state = await self._invoke_graph(initial)
@@ -274,6 +321,14 @@ class PromptPipeline:
             model_id=state["model_id"],
             usage={**state["usage"], "decisions": state["decisions"]},
         )
+        if self._summarizer is not None:
+            # The raw user prompt (not the enhanced form) feeds the rolling
+            # summary; schedule() is fire-and-forget and never raises.
+            self._summarizer.schedule(
+                session_id,
+                user_prompt=text,
+                response_text=state["final_output"],
+            )
         return PipelineResult(
             request_id=request_id,
             session_id=session_id,

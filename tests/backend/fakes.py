@@ -1,5 +1,5 @@
 """Shared in-memory fakes and app wiring helpers: the suite runs without
-Postgres, a model file, or the ``llama-cpp-python`` package."""
+a database server, a model file, or the ``llama-cpp-python`` package."""
 
 import time
 from dataclasses import dataclass, field
@@ -14,7 +14,9 @@ from app.llm.runtime import LlamaRuntime
 from app.main import create_app
 from app.orchestration.pipeline import PromptPipeline
 from app.orchestration.runner import AgentRunner
+from app.orchestration.summarizer import SessionSummarizer
 from app.state.events import EventBus
+from app.state.identity import IdentityStore
 from app.state.store import StateStore
 
 
@@ -22,9 +24,11 @@ class FakeLlama:
     """Mimics ``llama_cpp.Llama`` closely enough for the tests.
 
     Knobs: ``block_seconds`` simulates slow blocking inference,
-    ``fail_with`` makes the next completions raise, ``queued_responses``
-    replaces the default ``echo:`` reply (popped in order, one per call) —
-    e.g. to feed the review node a JSON verdict.
+    ``fail_with`` makes the next completions raise (every call until
+    cleared), ``fail_once`` makes exactly one completion raise (e.g. to fail
+    the enhancement call while review/respond still answer), and
+    ``queued_responses`` replaces the default ``echo:`` reply (popped in
+    order, one per call) — e.g. to feed the review node a JSON verdict.
     """
 
     def __init__(self, *, model_path, n_ctx, n_gpu_layers, verbose, **_):
@@ -36,6 +40,7 @@ class FakeLlama:
         self.concurrent_entry = False
         self.block_seconds = 0.0
         self.fail_with: Exception | None = None
+        self.fail_once: Exception | None = None
         self.queued_responses: list[str] = []
         self.closed = False
 
@@ -47,6 +52,9 @@ class FakeLlama:
         try:
             if self.block_seconds:
                 time.sleep(self.block_seconds)  # simulates blocking inference
+            if self.fail_once is not None:
+                exc, self.fail_once = self.fail_once, None
+                raise exc
             if self.fail_with is not None:
                 raise self.fail_with
             self.calls.append({"messages": messages, **params})
@@ -220,12 +228,24 @@ def make_app(
     max_queue_depth: int = 0,
     agent_timeout: float = 0.0,
     agent_max_steps: int = 0,
+    enhancement: bool = True,
+    summary: bool = False,
+    identity: IdentityStore | None = None,
 ):
     """App instance wired like the lifespan does, with fakes (no lifespan).
 
     The Step 17 guards (``max_queue_depth``, ``agent_timeout``,
     ``agent_max_steps``) default to disabled so happy-path tests are
     unaffected; guard tests opt in per instance.
+
+    ``enhancement`` mirrors the production default (on): the enhancement
+    LLM call is synchronous inside the request, so it stays deterministic.
+    ``summary`` defaults OFF here, unlike production: the background
+    summarize call pops ``queued_responses`` and appends to ``calls`` at a
+    nondeterministic time, which would poison any test that scripts
+    responses or asserts call lists. Closed-loop tests opt in with
+    ``summary=True`` and synchronize via
+    ``app.state.session_summarizer.wait_idle()``.
     """
     app = create_app()
     intake = PromptIntake(PolicyEngine(strict_mode=strict))
@@ -248,6 +268,15 @@ def make_app(
         max_steps=agent_max_steps,
     )
     app.state.agent_runner = runner
+    summarizer = None
+    if summary:
+        summarizer = SessionSummarizer(runtime=runtime, store=store)
+    app.state.session_summarizer = summarizer
+    # Empty identity by default: format_block() is "" so nothing changes in
+    # the injected summary for tests that don't opt in.
+    if identity is None:
+        identity = IdentityStore()
+    app.state.identity = identity
     app.state.prompt_pipeline = PromptPipeline(
         intake=intake,
         runtime=runtime,
@@ -256,6 +285,9 @@ def make_app(
         timeout_seconds=timeout,
         runner=runner,
         max_queue_depth=max_queue_depth,
+        summarizer=summarizer,
+        enhancement_enabled=enhancement,
+        identity=identity,
     )
     return app
 
@@ -268,8 +300,15 @@ def make_client(
     timeout: float = 5.0,
     store: StateStore | None = None,
     max_queue_depth: int = 0,
+    enhancement: bool = True,
+    summary: bool = False,
+    identity: IdentityStore | None = None,
 ) -> AsyncClient:
-    """HTTP client over a fake-wired app (see :func:`make_app`)."""
+    """HTTP client over a fake-wired app (see :func:`make_app`).
+
+    The wired app is exposed as ``client.app`` so tests can reach
+    ``client.app.state`` (e.g. ``session_summarizer.wait_idle()``).
+    """
     app = make_app(
         audit,
         runtime,
@@ -277,5 +316,10 @@ def make_client(
         timeout=timeout,
         store=store,
         max_queue_depth=max_queue_depth,
+        enhancement=enhancement,
+        summary=summary,
+        identity=identity,
     )
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    client.app = app
+    return client

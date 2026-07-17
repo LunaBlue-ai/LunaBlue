@@ -2,7 +2,7 @@
 
 Liveness is covered in test_llm_runtime.py (answers during generation); these
 cover the per-dependency readiness checks. The all-green path needs the
-docker-compose test Postgres (``audit_db`` fixture) and is skipped without it.
+suite's temp-file SQLite database (``audit_db`` fixture).
 """
 
 from httpx import ASGITransport, AsyncClient
@@ -71,7 +71,7 @@ async def test_readiness_reports_unhealthy_model_after_crash():
 
 
 async def test_readiness_is_ok_with_all_dependencies_green(audit_db):
-    """Full 200 path: database up (test Postgres), model healthy, audit queue
+    """Full 200 path: database up (temp SQLite), model healthy, audit queue
     idle, runner started."""
     app = _make_app()
     app.state.agent_runner.start()

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # One-shot development setup for LunaBlue (Step 18). Idempotent: safe to
 # re-run at any time; each step skips or redoes cleanly.
-#   1. Checks prerequisites (Python >= 3.11, Node >= 20, Docker) with
+#   1. Checks prerequisites (Python >= 3.11, Node >= 20) with
 #      actionable failure messages.
 #   2. Creates the Python venv at backend/.venv if missing.
 #   3. Installs the backend: pip install -e backend[dev], then the [llm]
@@ -52,13 +52,8 @@ node_major=${node_version%%.*}
     || fail "Node $node_version found, but the frontend toolchain (Vite 7) needs Node 20+. Install Node 22 LTS and re-run."
 echo "Node $node_version  OK"
 
-command -v docker > /dev/null 2>&1 \
-    || fail "Docker not found. Install Docker (https://docs.docker.com/get-docker/) and re-run. LunaBlue uses it for the Postgres audit database (docker compose up -d postgres)."
-if docker info > /dev/null 2>&1; then
-    echo "Docker $(docker --version | sed 's/Docker version //; s/,.*//')  OK"
-else
-    echo "warning: Docker CLI found, but the daemon is not running. Setup can continue; start Docker before 'docker compose up -d postgres'."
-fi
+# No database prerequisite (Step 21): the audit store is a local SQLite
+# file (data/lunablue.db) created automatically on first start.
 
 # -- [2/5] Python venv ------------------------------------------------------
 step "[2/5] Python venv (backend/.venv)"
@@ -104,9 +99,8 @@ else
 fi
 
 printf '\nSetup complete. Next steps (from the repo root):\n'
-echo "  1. docker compose up -d postgres"
-echo "  2. scripts/migrate.sh"
-echo "  3. scripts/download_model.sh     (~2.3 GB, one-time)"
-echo "  4. scripts/build_frontend.sh"
-echo "  5. cd backend && .venv/bin/uvicorn app.main:app --port 8000"
-echo "  6. open http://localhost:8000/"
+echo "  1. scripts/download_model.sh     (~2.3 GB, one-time)"
+echo "  2. scripts/build_frontend.sh"
+echo "  3. cd backend && .venv/bin/uvicorn app.main:app --port 8000"
+echo "  4. open http://localhost:8000/"
+echo "The audit database (data/lunablue.db) is created automatically on first start."

@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- SQLite audit database (Step 21): the audit store moved from Postgres in
+  Docker to a local SQLite file (`data/lunablue.db`, `sqlite+aiosqlite`),
+  created and migrated automatically on first start — Docker is no longer a
+  prerequisite and there are no manual database steps. Every connection runs
+  with WAL mode, `foreign_keys=ON`, and `synchronous=FULL` (audit-grade
+  durability); schema types are dialect-portable (`JSON`, `TZDateTime` for
+  timezone-aware round-trips). Removed: `docker-compose.yml`, the CI
+  Postgres service, the Docker prerequisite in `scripts/setup.*`, and the
+  `asyncpg` dependency (replaced by `aiosqlite`). Existing Postgres data is
+  not migrated; the old `lunablue_pgdata` Docker volume is left untouched
+  for rollback (delete it manually once comfortable). Database tests now run
+  against a temp SQLite file with no skip path.
+- Chat summary reset + identity fields (Step 20): a "Clear chat summary"
+  button in the chat header wipes the session's rolling context via the
+  idempotent `POST /api/sessions/{id}/summary/reset` (an epoch guard in the
+  summarizer discards in-flight background updates so they can never
+  resurrect the cleared summary). Five identity fields — Name, Age,
+  Occupation, Personality, Interests — always persist: stored outside the
+  LLM-maintained rolling buffer and prepended at injection time (never
+  truncated; the rolling tail yields under the `SESSION_SUMMARY_MAX_CHARS`
+  budget), so after a reset the next turn carries the identity-only block.
+  Defaults from new `IDENTITY_*` settings; runtime-editable via
+  `GET/PUT /api/identity` and the new Identity panel in the UI (in-memory
+  override, max 200 chars per field).
+- Closed-loop prompt processing (Step 19): every turn now runs raw prompt →
+  internal LLM enhancement (`prompt_enhancement` node, new `enhancing` run
+  phase) → rolling per-session chat summary injected under `### Chat
+  Summary` → generation, with the summary re-summarized in the background
+  after each response (`SessionSummarizer`, background LLM priority). Both
+  artifacts are internal-only: the summary lives in memory outside
+  `SessionSnapshot` and never reaches a wire payload; the enhanced prompt is
+  audited via the decision record in `prompt_responses.usage["decisions"]`.
+  Enhancement failure falls back to the reviewed prompt; a failed summary
+  update keeps the previous summary. New settings (all default on):
+  `PROMPT_ENHANCEMENT_ENABLED`, `PROMPT_ENHANCEMENT_MAX_TOKENS`,
+  `SESSION_SUMMARY_ENABLED`, `SESSION_SUMMARY_MAX_CHARS`,
+  `SESSION_SUMMARY_MAX_TOKENS`.
 - GPU visibility: the runtime now probes whether the installed
   `llama-cpp-python` build supports GPU offload. When `LLM_GPU_LAYERS` != 0 on
   a CPU-only build (which silently ignores it), startup logs a warning, and

@@ -15,8 +15,18 @@ def model_file(tmp_path):
 
 def make_settings(model_file, **overrides) -> Settings:
     """Settings with a valid baseline; ``_env_file=None`` keeps any local
-    .env from bleeding into the test."""
-    values = {"model_path": str(model_file), **overrides}
+    .env from bleeding into the test.
+
+    The database defaults to a SQLite file beside the model file so the
+    validator's directory write-probe never touches the repository tree.
+    """
+    values = {
+        "model_path": str(model_file),
+        "database_url": (
+            f"sqlite+aiosqlite:///{(model_file.parent / 'audit.db').as_posix()}"
+        ),
+        **overrides,
+    }
     return Settings(_env_file=None, **values)
 
 
@@ -40,11 +50,35 @@ def test_bad_database_url_is_reported(model_file):
     assert any("DATABASE_URL" in p for p in problems)
 
 
-def test_non_postgres_database_url_is_reported(model_file):
+def test_non_sqlite_database_url_is_reported(model_file):
+    """Step 21: the audit store is a local SQLite file — a Postgres DSN (or
+    the sync sqlite driver) is a misconfiguration."""
+    problems, _ = validate_settings(
+        make_settings(
+            model_file,
+            database_url="postgresql+asyncpg://u:p@localhost:5432/lunablue",
+        )
+    )
+    assert any("sqlite+aiosqlite" in p for p in problems)
+
     problems, _ = validate_settings(
         make_settings(model_file, database_url="sqlite:///audit.db")
     )
-    assert any("postgresql" in p for p in problems)
+    assert any("sqlite+aiosqlite" in p for p in problems)
+
+
+def test_unwritable_database_directory_is_reported(model_file, tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the data directory should go")
+    problems, _ = validate_settings(
+        make_settings(
+            model_file,
+            database_url=(
+                f"sqlite+aiosqlite:///{(blocker / 'audit.db').as_posix()}"
+            ),
+        )
+    )
+    assert any("DATABASE_URL" in p and "not" in p.lower() for p in problems)
 
 
 def test_numeric_bounds_are_enforced(model_file):

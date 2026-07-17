@@ -3,19 +3,26 @@
 Revision ID: 0001
 Revises:
 Create Date: 2026-07-12
+Rewritten for SQLite (Step 21): dialect-portable DDL — plain JSON instead of
+JSONB, CURRENT_TIMESTAMP defaults instead of now(), and integer primary keys
+that map to SQLite's rowid autoincrement. Safe to rewrite in place: this is
+the only revision and all Postgres databases are being abandoned.
 
 """
 from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "0001"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+# SQLite autoincrement requires INTEGER PRIMARY KEY (64-bit anyway); other
+# dialects keep BIGINT. Mirrors models.BigIntPK.
+_BIG_INT_PK = sa.BigInteger().with_variant(sa.Integer(), "sqlite")
 
 
 def upgrade() -> None:
@@ -26,16 +33,16 @@ def upgrade() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
-        sa.Column("metadata", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("metadata", sa.JSON(), nullable=True),
         sa.PrimaryKeyConstraint("session_id", name=op.f("pk_sessions")),
     )
     op.create_index(
@@ -49,14 +56,14 @@ def upgrade() -> None:
         sa.Column(
             "timestamp",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
         sa.Column("user_id", sa.String(length=64), nullable=True),
         sa.Column("raw_prompt", sa.Text(), nullable=False),
         sa.Column("reviewed_prompt", sa.Text(), nullable=True),
         sa.Column("prompt_version", sa.String(length=64), nullable=True),
-        sa.Column("governance", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("governance", sa.JSON(), nullable=True),
         sa.ForeignKeyConstraint(
             ["session_id"],
             ["sessions.session_id"],
@@ -74,18 +81,18 @@ def upgrade() -> None:
 
     op.create_table(
         "prompt_responses",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
+        sa.Column("id", _BIG_INT_PK, autoincrement=True, nullable=False),
         sa.Column("request_id", sa.String(length=64), nullable=False),
         sa.Column(
             "timestamp",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
         sa.Column("llm_output", sa.Text(), nullable=True),
         sa.Column("final_output", sa.Text(), nullable=True),
         sa.Column("model_id", sa.String(length=128), nullable=True),
-        sa.Column("usage", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("usage", sa.JSON(), nullable=True),
         sa.ForeignKeyConstraint(
             ["request_id"],
             ["prompt_requests.request_id"],
@@ -103,18 +110,18 @@ def upgrade() -> None:
 
     op.create_table(
         "agent_events",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
+        sa.Column("id", _BIG_INT_PK, autoincrement=True, nullable=False),
         sa.Column("agent_id", sa.String(length=64), nullable=False),
         sa.Column("request_id", sa.String(length=64), nullable=True),
         sa.Column(
             "timestamp",
             sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=False,
         ),
         sa.Column("event_type", sa.String(length=64), nullable=False),
         sa.Column("state", sa.String(length=64), nullable=True),
-        sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("payload", sa.JSON(), nullable=True),
         sa.ForeignKeyConstraint(
             ["request_id"],
             ["prompt_requests.request_id"],

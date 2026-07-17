@@ -167,7 +167,8 @@ async def test_respond_node_sets_draft_and_final_output(tmp_path):
 async def test_graph_runs_all_nodes_and_accumulates_decisions(tmp_path):
     runtime, fake = make_runtime(tmp_path)
     fake.queued_responses = [
-        '{"intent": "conversation", "needs_background_work": false, "concerns": []}'
+        "hello world",  # enhancement call: prompt passes through unchanged
+        '{"intent": "conversation", "needs_background_work": false, "concerns": []}',
     ]
     graph = build_main_graph(runtime)
 
@@ -179,12 +180,13 @@ async def test_graph_runs_all_nodes_and_accumulates_decisions(tmp_path):
     # One decision record per node, in execution order, each timed.
     assert [d["node"] for d in state["decisions"]] == [
         "prompt_engineering",
+        "prompt_enhancement",
         "llm_review",
         "respond",
     ]
     assert all(d["duration_ms"] >= 0 for d in state["decisions"])
-    # Two LLM calls: review then respond.
-    assert len(fake.calls) == 2
+    # Three LLM calls: enhance, review, then respond.
+    assert len(fake.calls) == 3
 
 
 async def test_generation_failure_inside_a_node_propagates(tmp_path):
@@ -201,7 +203,8 @@ async def test_generation_failure_inside_a_node_propagates(tmp_path):
 async def test_graph_with_store_advances_run_phases(tmp_path):
     runtime, fake = make_runtime(tmp_path)
     fake.queued_responses = [
-        '{"intent": "conversation", "needs_background_work": false, "concerns": []}'
+        "hello world",  # enhancement call
+        '{"intent": "conversation", "needs_background_work": false, "concerns": []}',
     ]
     store = StateStore(max_finished_runs=8)
     await store.start_run("req-1", "sess-1")
@@ -216,6 +219,7 @@ async def test_graph_with_store_advances_run_phases(tmp_path):
     assert [p.phase for p in run.phases] == [
         "received",
         "engineering",
+        "enhancing",
         "reviewing",
         "responding",
     ]
@@ -226,7 +230,7 @@ async def test_graph_with_store_advances_run_phases(tmp_path):
 async def test_graph_without_a_started_run_is_untracked_but_runs(tmp_path):
     """A store-instrumented graph tolerates unknown runs (e.g. evicted)."""
     runtime, fake = make_runtime(tmp_path)
-    fake.queued_responses = ['{"intent": "conversation"}']
+    fake.queued_responses = ["hello world", '{"intent": "conversation"}']
     store = StateStore(max_finished_runs=8)
     graph = build_main_graph(runtime, store)
 

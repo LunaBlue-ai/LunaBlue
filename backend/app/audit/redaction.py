@@ -12,7 +12,7 @@ Redaction is regex-based and therefore best-effort: it catches well-known
 token shapes and anything the configured patterns match, not every possible
 secret. It runs on the producer side of :class:`~app.audit.service.AuditService`
 (cheap, bounded regex work) so redacted text is all that ever sits in the
-queue or reaches Postgres.
+queue or reaches the database.
 """
 
 import re

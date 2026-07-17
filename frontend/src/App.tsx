@@ -3,6 +3,7 @@ import { getHealth, getReadiness } from "./api/client";
 import type { ReadinessStatus } from "./types";
 import { AgentPanel } from "./components/AgentPanel";
 import { Chat } from "./components/Chat";
+import { IdentityPanel } from "./components/IdentityPanel";
 import { StatusBar } from "./components/StatusBar";
 import { useWebSocket } from "./hooks/useWebSocket";
 import {
@@ -43,6 +44,7 @@ export default function App() {
   // Chat stays primary; the agent panel sits alongside and can be collapsed
   // (index.css stacks it below the chat on narrow widths).
   const [panelOpen, setPanelOpen] = useState(true);
+  const [identityOpen, setIdentityOpen] = useState(false);
   const activeAgents = Object.values(agents).filter(isActiveAgent).length;
 
   // Live updates: /ws socket with reconnect, plus the polling fallback.
@@ -117,18 +119,29 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>LunaBlue</h1>
-        <button
-          type="button"
-          className="agent-panel-toggle"
-          aria-expanded={panelOpen}
-          onClick={() => setPanelOpen((open) => !open)}
-        >
-          Agents{activeAgents > 0 ? ` (${activeAgents})` : ""}
-        </button>
+        <div className="app-header-actions">
+          <button
+            type="button"
+            className="identity-toggle"
+            aria-expanded={identityOpen}
+            onClick={() => setIdentityOpen((open) => !open)}
+          >
+            Identity
+          </button>
+          <button
+            type="button"
+            className="agent-panel-toggle"
+            aria-expanded={panelOpen}
+            onClick={() => setPanelOpen((open) => !open)}
+          >
+            Agents{activeAgents > 0 ? ` (${activeAgents})` : ""}
+          </button>
+        </div>
       </header>
       <div className="app-body">
         <Chat />
         {panelOpen && <AgentPanel />}
+        {identityOpen && <IdentityPanel />}
       </div>
       <StatusBar />
     </div>

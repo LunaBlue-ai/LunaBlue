@@ -4,7 +4,7 @@ Liveness vs. readiness (Step 17):
 
 - ``GET /api/health`` — liveness: the process is up and the event loop
   answers. Never touches dependencies, so it responds promptly even while a
-  generation is in flight or Postgres is down.
+  generation is in flight or the audit database is unavailable.
 - ``GET /api/health/ready`` — readiness: every dependency is examined and
   reported individually under ``checks`` (database reachable, model loaded
   *and* healthy, audit queue not overflowing, agent runner alive). 503 with
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "lunablue"
 
-# Readiness must answer fast even when Postgres is black-holing packets.
+# Readiness must answer fast even when the database is unresponsive.
 _DB_CHECK_TIMEOUT_SECONDS = 5.0
 
 
@@ -112,7 +112,7 @@ async def get_readiness(request: Request) -> JSONResponse:
 
     Deliberately lock-free on the LLM side so it answers promptly while a
     generation is in progress, and time-bounded on the database side so a
-    hanging Postgres yields a fast 503 rather than a stalled probe.
+    hanging database yields a fast 503 rather than a stalled probe.
     """
     model_check, model_field = _check_model(request)
     checks: dict[str, dict[str, Any]] = {

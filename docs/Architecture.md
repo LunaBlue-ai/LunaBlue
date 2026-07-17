@@ -2,7 +2,7 @@
 
 ## Overview
 
-LunaBlue is a Python-first, local AI assistant architecture built around FastAPI, React, LangGraph, and an in-process `llama.cpp` runtime. The backend is written in Python, the frontend is a React app, and Postgres is the primary durable database for auditing and state persistence.
+LunaBlue is a Python-first, local AI assistant architecture built around FastAPI, React, LangGraph, and an in-process `llama.cpp` runtime. The backend is written in Python, the frontend is a React app, and a local SQLite database is the durable store for auditing and state persistence (Step 21).
 
 ## High-level architecture
 
@@ -14,8 +14,8 @@ LunaBlue is a Python-first, local AI assistant architecture built around FastAPI
   - background agent execution
   - an in-process local LLM via `llama-cpp-python`
   - runtime state accessible by both API and frontend via WebSockets
-- **State:** in-memory state with durable persistence in Postgres.
-- **Audit:** prompt requests and prompt responses logged to Postgres.
+- **State:** in-memory state with durable persistence in SQLite.
+- **Audit:** prompt requests and prompt responses logged to SQLite.
 
 ## Architecture diagram
 
@@ -25,7 +25,7 @@ The service structure follows the diagram:
 - `Web React` communicates with `API` over HTTP and optionally WebSockets
 - `API` and `LangGraph / llama.cpp` run inside the same FastAPI process
 - shared service `State` is managed in-memory and exposed for UI updates
-- `Log / Audit` is persisted externally in Postgres
+- `Log / Audit` is persisted in a local SQLite file (`data/lunablue.db`)
 
 ## Components
 
@@ -39,7 +39,7 @@ Responsibilities:
 - host prompt and agent API endpoints
 - maintain in-memory state for the active session and agents
 - optionally expose WebSocket endpoints for live frontend updates
-- persist prompt and response audit data to Postgres
+- persist prompt and response audit data to the SQLite audit database
 - instantiate and reuse a single global LLM runtime
 
 ### 2. Web React frontend
@@ -69,11 +69,11 @@ Service state is held in-process and may include:
 - active session metadata
 - live status for frontend updates
 
-Durable persistence is provided by Postgres for audit records and application state. Local caches may be used for performance, but Postgres is the primary database.
+Durable persistence is provided by a local SQLite database (WAL mode, created automatically on first start) for audit records and application state. Local caches may be used for performance, but SQLite is the primary database.
 
-### 5. Postgres Log / Audit
+### 5. SQLite Log / Audit
 
-Postgres stores audit records from the service, including:
+The SQLite audit database stores records from the service, including:
 
 - raw prompt requests
 - reviewed prompt text
@@ -91,7 +91,6 @@ lunablue/
 ├── CHANGELOG.md
 ├── .gitignore
 ├── .env.example                    # documented environment variables (DB URL, model path, ports, guards)
-├── docker-compose.yml              # local Postgres for development + throwaway postgres-test (profile "test")
 ├── pytest.ini                      # repo-root pytest config: the backend suite runs from here
 │
 ├── backend/                        # Python FastAPI service (Components/API.md)
@@ -152,7 +151,7 @@ lunablue/
 │       │   ├── store.py            # session, run, and agent state
 │       │   └── events.py           # pub/sub bridge from state changes to WebSocket broadcasts
 │       │
-│       ├── audit/                  # Postgres log/audit (Components/AUDIT.md)
+│       ├── audit/                  # SQLite log/audit (Components/AUDIT.md)
 │       │   ├── __init__.py
 │       │   ├── db.py               # SQLAlchemy engine and session management
 │       │   ├── models.py           # tables: prompt_requests, prompt_responses, agent_events, sessions
@@ -210,14 +209,14 @@ lunablue/
 └── scripts/                        # each as .ps1 (Windows) and .sh (macOS/Linux)
     ├── setup                       # prereq checks, venv, backend + frontend installs, .env
     ├── build_frontend              # build React app and copy dist into backend/app/static
-    ├── migrate                     # run Alembic migrations against Postgres
+    ├── migrate                     # run Alembic migrations manually (startup does this automatically)
     ├── download_model              # fetch the default GGUF model into models/
     └── retention                   # apply the audit retention policy (supports --dry-run)
 ```
 
 ### Directory design rationale
 
-**One process, separated concerns.** Everything under `backend/app/` runs in the single FastAPI process, per the design principles below. The subpackages enforce the separation called out in [Components/API.md](Components/API.md): `api/` does routing only, `governance/` owns prompt intake policy, `orchestration/` owns LangGraph, `llm/` owns the model runtime, `state/` owns shared memory, and `audit/` owns Postgres writes. Nothing outside `llm/` touches llama.cpp directly, which keeps the "single global LLM instance" rule enforceable.
+**One process, separated concerns.** Everything under `backend/app/` runs in the single FastAPI process, per the design principles below. The subpackages enforce the separation called out in [Components/API.md](Components/API.md): `api/` does routing only, `governance/` owns prompt intake policy, `orchestration/` owns LangGraph, `llm/` owns the model runtime, `state/` owns shared memory, and `audit/` owns the SQLite database writes. Nothing outside `llm/` touches llama.cpp directly, which keeps the "single global LLM instance" rule enforceable.
 
 **Startup order lives in `main.py`.** The FastAPI lifespan handler is the natural place to: load config, create the SQLAlchemy engine, instantiate the global llama.cpp runtime once, initialize the state store, then mount routes and static files. Shutdown reverses this.
 
@@ -227,7 +226,7 @@ lunablue/
 
 **Audit decoupling.** `audit/service.py` should accept structured events and write them off the hot path (background task or queue), per the implementation note in [Components/AUDIT.md](Components/AUDIT.md). Alembic migrations live with the backend since the schema is owned by the Python service.
 
-**Tests.** Backend tests live at the repo root (`tests/backend`, run via the root `pytest.ini`) and fake the LLM runtime via `conftest.py`/`fakes.py`, so the suite runs without a model file or GPU. Frontend tests are colocated with the app in `frontend/tests` and run with Vitest. Database-backed tests use the throwaway `postgres-test` compose service and skip (locally) or must pass (CI) when it is absent — see the root README.
+**Tests.** Backend tests live at the repo root (`tests/backend`, run via the root `pytest.ini`) and fake the LLM runtime via `conftest.py`/`fakes.py`, so the suite runs without a model file or GPU. Frontend tests are colocated with the app in `frontend/tests` and run with Vitest. Database-backed tests run against a per-session temp-file SQLite database automatically — nothing to start, nothing skips (Step 21).
 
 **Models are data, not code.** `/models` holds GGUF artifacts and is gitignored; `scripts/download_model` plus a README make the setup reproducible without committing multi-gigabyte files.
 
@@ -239,7 +238,7 @@ lunablue/
 4. The main LangGraph orchestrator runs inside the same FastAPI process.
 5. Prompt engineering, LLM review, and any agent spawning occur in-process.
 6. Shared state is kept live and can be pushed to the frontend via WebSockets.
-7. Prompt responses and final output are persisted to Postgres.
+7. Prompt responses and final output are persisted to the SQLite audit database.
 8. The frontend receives the result and agent status updates.
 
 ## Design principles
@@ -247,7 +246,7 @@ lunablue/
 - keep the system local and self-contained inside FastAPI
 - serve the React UI and execute orchestration from the same service
 - use WebSockets for live state updates rather than polling only
-- retain prompt and response audit trails in Postgres
+- retain prompt and response audit trails in the SQLite audit database
 - prefer in-process LLM execution with `llama-cpp-python` over remote model servers
 
 ## Notes
@@ -255,5 +254,5 @@ lunablue/
 - The FastAPI service is both the frontend server and the backend runtime.
 - The local `llama.cpp` instance is shared by all graph execution paths.
 - WebSockets are recommended for real-time UI state and agent lifecycle updates.
-- Postgres remains the external store for audit logs, while runtime state is primarily in-memory.
+- SQLite (a local file, WAL mode) is the durable store for audit logs, while runtime state is primarily in-memory.
 

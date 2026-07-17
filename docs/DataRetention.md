@@ -1,7 +1,8 @@
 # Data Retention and Privacy Safeguards
 
 LunaBlue's audit store (`docs/Components/AUDIT.md`) persists every prompt
-request, reviewed prompt, model output, and agent event to Postgres. That
+request, reviewed prompt, model output, and agent event to the SQLite
+audit database. That
 durability is the point of the audit trail — but stored prompt content is
 also the most sensitive data the system handles. Step 17 adds two
 configurable safeguards: **redaction** (mask secrets/PII before rows are
@@ -24,7 +25,7 @@ startup.
 **Where it runs.** On the producer side of the audit writer
 (`AuditService.record_prompt_request` / `record_prompt_response`), *before*
 the event is enqueued. Unredacted text therefore never sits in the audit
-queue, never crosses the consumer, and never reaches Postgres. The fields
+queue, never crosses the consumer, and never reaches the database. The fields
 covered are `raw_prompt`, `reviewed_prompt`, `llm_output`, and
 `final_output`.
 
@@ -79,7 +80,7 @@ shorter retention: `STATE_MAX_FINISHED_RUNS` / `STATE_MAX_FINISHED_AGENTS`).
 ## Related safeguards
 
 - Everything is local-first: prompts and outputs never leave the machine;
-  the audit store is a local Postgres owned by the deployment.
+  the audit store is a local SQLite file owned by the deployment.
 - API error responses never echo prompt content, stack traces, or file
   paths (`backend/app/api/errors.py`); internals go to the process log
   keyed by `request_id`.
