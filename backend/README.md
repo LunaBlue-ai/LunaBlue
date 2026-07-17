@@ -29,7 +29,9 @@ scripts/download_model.sh      # Unix / macOS
 
 ### Install variants
 
-The default `pip install -e "backend[dev,llm]"` builds **CPU-only** — correct and safe everywhere, no extra toolchain needed. To offload layers to a GPU (`LLM_GPU_LAYERS` > 0), reinstall `llama-cpp-python` with the matching backend enabled at build time:
+`scripts/setup` installs the **prebuilt CPU wheel** of `llama-cpp-python` from the project's wheel index (`--only-binary=:all: --index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --extra-index-url https://pypi.org/simple`) — no toolchain needed, works everywhere. A bare `pip install -e "backend[dev,llm]"` may instead resolve to the PyPI **sdist** and build from source; on Windows that needs CMake + Visual Studio Build Tools **and** long paths enabled — an `OSError: [Errno 2] No such file or directory` on a deep `...\vendor\llama.cpp\...` path during install is the long-path (260-char `MAX_PATH`) symptom, not a missing file. Prefer the wheel-index command above; enabling `LongPathsEnabled=1` in the registry is only needed if you genuinely want a source build.
+
+To offload layers to a GPU (`LLM_GPU_LAYERS` > 0), reinstall `llama-cpp-python` with the matching backend enabled at build time:
 
 ```bash
 # CUDA (NVIDIA)

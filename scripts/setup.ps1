@@ -85,18 +85,36 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Backend + dev tools installed."
 
-Step "[3/5] Installing the LLM runtime (backend[llm]: llama-cpp-python, CPU build)"
+Step "[3/5] Installing the LLM runtime (llama-cpp-python, prebuilt CPU wheel)"
+# Install llama-cpp-python from the project's wheel index, never from the
+# PyPI sdist: a source build needs CMake + a C++ toolchain AND (on Windows)
+# long paths enabled - the vendored llama.cpp tree nests deep enough that
+# sdist extraction fails with a misleading "Errno 2 No such file or
+# directory" under the default 260-char MAX_PATH limit. --only-binary
+# forbids that fallback outright. Skipped when any build (e.g. a GPU wheel,
+# see backend/README.md) is already installed.
+& $venvPython -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('llama_cpp') else 1)"
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "llama-cpp-python already installed - leaving it untouched (GPU builds stay intact)."
+} else {
+    & $venvPython -m pip install --quiet llama-cpp-python --only-binary=:all: `
+        --index-url https://abetlen.github.io/llama-cpp-python/whl/cpu `
+        --extra-index-url https://pypi.org/simple
+    if ($LASTEXITCODE -ne 0) {
+        Fail @"
+llama-cpp-python install failed. Retry the prebuilt CPU wheel directly:
+  backend\.venv\Scripts\pip install llama-cpp-python --only-binary=:all: --index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --extra-index-url https://pypi.org/simple
+If you must build from source instead (not recommended), you need CMake and
+a C++ toolchain (Visual Studio Build Tools on Windows) AND Windows long
+paths enabled (LongPathsEnabled=1) - an "Errno 2" failure on a deep
+vendor\llama.cpp\... path means long paths are off, not that a file is
+missing. See backend/README.md (Install variants), incl. GPU builds.
+"@
+    }
+}
 & $venvPython -m pip install --quiet -e "$backendDir[dev,llm]"
 if ($LASTEXITCODE -ne 0) {
-    Fail @"
-llama-cpp-python install failed. It ships prebuilt wheels for common
-platforms; when pip falls back to a source build it needs CMake and a C++
-toolchain (Visual Studio Build Tools on Windows). Alternatives:
-  - install build tools, then re-run this script, or
-  - use the project's wheel index:
-      backend\.venv\Scripts\pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-See backend/README.md (Install variants) for GPU builds.
-"@
+    Fail "backend[dev,llm] install failed (see pip output above). Fix the reported issue and re-run."
 }
 Write-Host "LLM runtime installed."
 

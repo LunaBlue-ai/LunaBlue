@@ -71,10 +71,20 @@ step "[3/5] Installing backend (pip install -e backend[dev])"
     || fail "backend install failed (see pip output above). Fix the reported issue and re-run."
 echo "Backend + dev tools installed."
 
-step "[3/5] Installing the LLM runtime (backend[llm]: llama-cpp-python, CPU build)"
-if ! "$venv_python" -m pip install --quiet -e "$backend_dir[dev,llm]"; then
-    fail "llama-cpp-python install failed. When pip falls back to a source build it needs CMake and a C++ toolchain (build-essential + cmake on Debian/Ubuntu, Xcode CLT on macOS). Install those and re-run, or use the prebuilt wheel index: backend/.venv/bin/pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu - see backend/README.md (Install variants)."
+step "[3/5] Installing the LLM runtime (llama-cpp-python, prebuilt CPU wheel)"
+# Install llama-cpp-python from the project's wheel index, never from the
+# PyPI sdist: a source build needs CMake + a C++ toolchain, and pip may
+# prefer a newer sdist over an older wheel without --only-binary. Skipped
+# when any build (e.g. a GPU wheel, see backend/README.md) is installed.
+if "$venv_python" -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('llama_cpp') else 1)"; then
+    echo "llama-cpp-python already installed - leaving it untouched (GPU builds stay intact)."
+elif ! "$venv_python" -m pip install --quiet llama-cpp-python --only-binary=:all: \
+        --index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+        --extra-index-url https://pypi.org/simple; then
+    fail "llama-cpp-python install failed. Retry the prebuilt CPU wheel directly: backend/.venv/bin/pip install llama-cpp-python --only-binary=:all: --index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --extra-index-url https://pypi.org/simple. Building from source instead needs CMake and a C++ toolchain (build-essential + cmake on Debian/Ubuntu, Xcode CLT on macOS) - see backend/README.md (Install variants), incl. GPU builds."
 fi
+"$venv_python" -m pip install --quiet -e "$backend_dir[dev,llm]" \
+    || fail "backend[dev,llm] install failed (see pip output above). Fix the reported issue and re-run."
 echo "LLM runtime installed."
 
 # NVIDIA GPU present? The default install above is CPU-only and silently

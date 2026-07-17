@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Setup scripts now install `llama-cpp-python` from the project's prebuilt
+  CPU wheel index with `--only-binary=:all:` (skipped when any build — e.g.
+  a GPU wheel — is already present). Fixes installs on machines where PyPI
+  has no matching wheel and pip fell back to a source build: no more
+  CMake/MSVC requirement, and no more `Errno 2` MAX_PATH failures
+  extracting the deeply nested sdist on Windows. backend/README.md
+  documents the long-path symptom and the source-build prerequisites.
 - SQLite audit database (Step 21): the audit store moved from Postgres in
   Docker to a local SQLite file (`data/lunablue.db`, `sqlite+aiosqlite`),
   created and migrated automatically on first start — Docker is no longer a
