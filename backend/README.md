@@ -68,6 +68,16 @@ On Windows (PowerShell) set the variable first: `$env:CMAKE_ARGS = "-DGGML_METAL
 
 Startup behavior: requesting `LLM_GPU_LAYERS` != 0 on a CPU-only build logs a warning (llama.cpp would otherwise silently run on CPU), and `/api/health/ready` reports the capability as `gpu_offload_supported` in the model check. An installed build that fails to **import** (e.g. a `cu130` wheel on a driver that only supports CUDA 12.x) aborts startup with an actionable `LlamaRuntimeUnavailableError` instead of a raw traceback — re-run `scripts/setup` to repair it.
 
+## Embeddings & semantic search
+
+Every audited prompt and response is embedded into a local vector store (SQLite + [sqlite-vec](https://github.com/asg017/sqlite-vec)) and searchable via `GET /api/search?q=...&limit=10&kind=all|prompt|response`. The pieces:
+
+- **Model:** a second small GGUF — [nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) Q8, ~140 MB, Apache-2.0 — fetched by `scripts/download_embedding_model.ps1` (or `.sh`) to `models/embedding.gguf`. It loads in-process (`embedding=True`) alongside the chat model with its own lock, so embedding work never queues behind chat generation. `EMBEDDING_GPU_LAYERS` mirrors `LLM_GPU_LAYERS` (setup sets both to `-1` on a verified GPU install).
+- **Vectors:** 512-dim float32 (the model's 768-dim Matryoshka output truncated + re-normalized; `EMBEDDING_DIMENSIONS`), stored in the `vec_prompt_embeddings` vec0 virtual table keyed to the Alembic-managed `prompt_embeddings` metadata table. Search is brute-force KNN — sqlite-vec has no ANN index, and at this scale (thousands of turns) queries are single-digit-ms.
+- **Ingestion:** after the audit writer commits a prompt/response row, the background `EmbeddingIndexer` embeds the stored (post-redaction) text and writes the vector — never on the request path. Failed runs (NULL output) are skipped.
+- **Backfill:** `scripts/backfill_embeddings.ps1` (or `.sh`) embeds all pre-existing rows; idempotent, `--dry-run` reports counts. Re-run it after changing the embedding model or `EMBEDDING_DIMENSIONS` (drop `vec_prompt_embeddings` and clear `prompt_embeddings` first — the startup log tells you when this is needed).
+- **Degradation:** embeddings are an enhancement. A missing model file or an unloadable sqlite-vec extension logs a warning, `/api/search` answers 503 (`code: embeddings_unavailable`), and everything else runs normally; the `embedding` check in `/api/health/ready` reports the state without failing readiness. Set `EMBEDDING_ENABLED=false` to turn the feature off.
+
 ## Run
 
 From `backend/`:

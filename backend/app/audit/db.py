@@ -20,6 +20,7 @@ the audit store depends on, on every new connection:
   per batch.
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +35,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+logger = logging.getLogger(__name__)
+
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
@@ -44,12 +47,61 @@ _SQLITE_PRAGMAS = (
     "PRAGMA synchronous=FULL",
 )
 
+# Whether the sqlite-vec extension loaded on this engine's connections.
+# None = no sqlite engine initialized yet; embedding search requires True.
+_vec_loaded: bool | None = None
+_vec_load_warned = False
+
+
+def vec_available() -> bool:
+    """Whether connections carry the sqlite-vec extension (vec0 tables)."""
+    return bool(_vec_loaded)
+
+
+def _load_vec_extension(dbapi_conn: Any) -> None:
+    """Load sqlite-vec into a new connection; degrade quietly on failure.
+
+    The vector store is an enhancement: a Python build without
+    ``enable_load_extension`` (or a broken sqlite-vec install) must not
+    prevent the audit store from working.
+
+    The sqlite3 connection lives in aiosqlite's worker thread
+    (``check_same_thread`` enforced), so the extension calls must go
+    through aiosqlite's coroutine API rather than touching the raw
+    connection directly. The connect event runs inside SQLAlchemy's
+    greenlet adaptation, so ``await_only`` bridges the coroutines here.
+    """
+    global _vec_loaded, _vec_load_warned
+    try:
+        import sqlite_vec
+        from sqlalchemy.util import await_only
+
+        raw = getattr(dbapi_conn, "driver_connection", dbapi_conn)
+        await_only(raw.enable_load_extension(True))
+        try:
+            await_only(raw.load_extension(sqlite_vec.loadable_path()))
+        finally:
+            await_only(raw.enable_load_extension(False))
+        _vec_loaded = True
+    except Exception as exc:
+        _vec_loaded = False
+        if not _vec_load_warned:
+            _vec_load_warned = True
+            logger.warning(
+                "sqlite-vec extension failed to load (%s: %s) - embedding "
+                "storage and /api/search are disabled. The audit store is "
+                "unaffected.",
+                type(exc).__name__,
+                exc,
+            )
+
 
 def _set_sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
     cursor = dbapi_conn.cursor()
     for pragma in _SQLITE_PRAGMAS:
         cursor.execute(pragma)
     cursor.close()
+    _load_vec_extension(dbapi_conn)
 
 
 def run_migrations(database_url: str) -> None:
@@ -97,11 +149,12 @@ def init_engine(database_url: str) -> AsyncEngine:
 
 async def dispose_engine() -> None:
     """Close all pooled connections; called from lifespan shutdown."""
-    global _engine, _session_factory
+    global _engine, _session_factory, _vec_loaded
     if _engine is not None:
         await _engine.dispose()
     _engine = None
     _session_factory = None
+    _vec_loaded = None
 
 
 def get_engine() -> AsyncEngine:

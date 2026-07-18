@@ -14,7 +14,7 @@ from app import __version__
 from app.api import websocket
 from app.api.errors import install_error_handling
 from app.api.routes import api_router
-from app.audit import db
+from app.audit import db, vectors
 from app.audit.redaction import Redactor
 from app.audit.service import AuditService
 from app.config import get_settings
@@ -25,6 +25,8 @@ from app.llm.runtime import (
     LlamaRuntimeUnavailableError,
     ModelNotFoundError,
 )
+from app.llm.embedding import EmbeddingRuntime
+from app.orchestration.indexer import EmbeddingIndexer
 from app.orchestration.pipeline import PromptPipeline
 from app.orchestration.runner import AgentRunner
 from app.orchestration.summarizer import SessionSummarizer
@@ -84,6 +86,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # half-schema'd.
     await asyncio.to_thread(db.run_migrations, settings.resolved_database_url)
     db.init_engine(settings.resolved_database_url)
+    # Embeddings (optional enhancement): a second small GGUF embeds stored
+    # prompts/responses into the sqlite-vec store for /api/search. Missing
+    # model or unusable sqlite-vec extension degrades with a warning —
+    # never blocks startup.
+    embedding_runtime = None
+    embedding_indexer = None
+    if settings.embedding_enabled:
+        embedding_runtime = EmbeddingRuntime(
+            model_path=str(settings.resolved_embedding_model_path),
+            context_size=settings.embedding_context_size,
+            gpu_layers=settings.embedding_gpu_layers,
+            dimensions=settings.embedding_dimensions,
+        )
+        embedding_runtime.load()
+        vec_ready = await vectors.ensure_schema(
+            db.get_engine(), settings.embedding_dimensions
+        )
+        if embedding_runtime.available and vec_ready:
+            embedding_indexer = EmbeddingIndexer(embedding_runtime)
+    app.state.embedding_runtime = embedding_runtime
+    app.state.embedding_indexer = embedding_indexer
     redactor = (
         Redactor(extra_patterns=settings.audit_redaction_patterns)
         if settings.audit_redaction_enabled
@@ -93,6 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.audit_max_queue_size,
         redactor=redactor,
         drop_log_interval=settings.audit_drop_log_interval_seconds,
+        indexer=embedding_indexer,
     )
     audit_service.start()
     app.state.audit_service = audit_service
@@ -121,6 +145,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Tear down what startup already built; the finally below never runs
         # when startup itself raises.
         await audit_service.close()
+        if embedding_runtime is not None:
+            embedding_runtime.close()
         await db.dispose_engine()
         raise
     app.state.llm_runtime = runtime
@@ -191,7 +217,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await summarizer.aclose()
         await agent_runner.close()
         await audit_service.close()
+        # After the audit drain: nothing schedules new embeddings anymore.
+        # Pending embedding writes are recoverable via the backfill script,
+        # so cancelling them is safe.
+        if embedding_indexer is not None:
+            await embedding_indexer.aclose()
         runtime.close()
+        if embedding_runtime is not None:
+            embedding_runtime.close()
         await db.dispose_engine()
         logger.info("LunaBlue backend shutting down")
 

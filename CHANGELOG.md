@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Embeddings & semantic search: every audited prompt and response is now
+  embedded into a local sqlite-vec store and searchable via
+  `GET /api/search` (KNN by L2 distance, `kind=prompt|response|all`). A
+  second small GGUF (nomic-embed-text-v1.5 Q8, ~140 MB, fetched by
+  `scripts/download_embedding_model.*`) runs in-process with its own lock
+  and GPU setting (`EMBEDDING_GPU_LAYERS`; setup auto-sets `-1` on GPU
+  installs); vectors are the model's Matryoshka 768-dim output truncated
+  to 512 and re-normalized (`EMBEDDING_DIMENSIONS`). Ingestion happens in
+  the background after the audit writer commits a row, so embedded text is
+  exactly the stored (post-redaction) text and the request path is
+  untouched; `scripts/backfill_embeddings.*` embeds pre-existing history
+  idempotently. Vectors live in a `vec0` virtual table (created at
+  runtime, excluded from Alembic autogenerate) keyed to the new
+  `prompt_embeddings` table (migration 0002); retention now sweeps
+  orphaned vectors. The whole feature degrades gracefully: missing model
+  or unloadable extension logs a warning, `/api/search` answers 503, and
+  the new `embedding` readiness check reports state without failing
+  readiness (`EMBEDDING_ENABLED=false` turns it off). New dependency:
+  `sqlite-vec`.
 - Automatic GPU wheel selection: setup scripts now detect the NVIDIA
   driver's maximum supported CUDA version (from the `nvidia-smi` banner)
   and install the matching prebuilt `llama-cpp-python` CUDA wheel — `cu130`

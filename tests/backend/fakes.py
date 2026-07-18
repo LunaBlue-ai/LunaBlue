@@ -1,7 +1,9 @@
 """Shared in-memory fakes and app wiring helpers: the suite runs without
 a database server, a model file, or the ``llama-cpp-python`` package."""
 
+import random
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from app.audit.service import AgentEvent
 from app.governance.intake import PromptIntake
 from app.governance.policy import PolicyEngine
+from app.llm.embedding import EmbeddingRuntime
 from app.llm.runtime import LlamaRuntime
 from app.main import create_app
 from app.orchestration.pipeline import PromptPipeline
@@ -123,6 +126,63 @@ class FakeLlamaRuntime(LlamaRuntime):
         ]
 
 
+class FakeEmbeddingLlama:
+    """Mimics ``llama_cpp.Llama(embedding=True)`` for the tests.
+
+    ``embed`` returns a deterministic pseudo-random vector seeded from the
+    input text (identical text always embeds identically); queue exact
+    vectors via ``queued_vectors`` when a test needs to control distances.
+    ``fail_with`` makes every embed call raise until cleared.
+    """
+
+    RAW_DIMS = 768
+
+    def __init__(
+        self, *, model_path, n_ctx, n_gpu_layers, embedding=False, verbose=False, **_
+    ):
+        self.model_path = model_path
+        self.n_ctx = n_ctx
+        self.n_gpu_layers = n_gpu_layers
+        self.embedding = embedding
+        self.calls: list[str] = []
+        self.queued_vectors: list[list[float]] = []
+        self.fail_with: Exception | None = None
+        self.closed = False
+
+    def embed(self, text: str) -> list[float]:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.calls.append(text)
+        if self.queued_vectors:
+            return self.queued_vectors.pop(0)
+        rng = random.Random(zlib.crc32(text.encode("utf-8")))
+        return [rng.uniform(-1.0, 1.0) for _ in range(self.RAW_DIMS)]
+
+    def close(self):
+        self.closed = True
+
+
+def make_embedding_runtime(
+    tmp_path, **kwargs
+) -> tuple[EmbeddingRuntime, FakeEmbeddingLlama]:
+    """A loaded embedding runtime backed by FakeEmbeddingLlama."""
+    model_file = tmp_path / "embedding.gguf"
+    model_file.write_bytes(b"gguf")
+    holder: list[FakeEmbeddingLlama] = []
+
+    def factory(**factory_kwargs):
+        fake = FakeEmbeddingLlama(**factory_kwargs)
+        holder.append(fake)
+        return fake
+
+    runtime = EmbeddingRuntime(
+        model_path=str(model_file), llama_factory=factory, **kwargs
+    )
+    runtime.load()
+    assert runtime.available
+    return runtime, holder[0]
+
+
 def make_runtime(tmp_path, **kwargs) -> tuple[LlamaRuntime, FakeLlama]:
     """A loaded runtime backed by FakeLlama and a real (empty) model file."""
     model_file = tmp_path / "model.gguf"
@@ -231,6 +291,8 @@ def make_app(
     enhancement: bool = True,
     summary: bool = False,
     identity: IdentityStore | None = None,
+    embedding_runtime: EmbeddingRuntime | None = None,
+    embedding_indexer=None,
 ):
     """App instance wired like the lifespan does, with fakes (no lifespan).
 
@@ -256,6 +318,8 @@ def make_app(
     app.state.audit_service = audit
     app.state.prompt_intake = intake
     app.state.llm_runtime = runtime
+    app.state.embedding_runtime = embedding_runtime
+    app.state.embedding_indexer = embedding_indexer
     app.state.state_store = store
     app.state.event_bus = event_bus
     # Not started here (starting workers needs a running loop); tests that
@@ -303,6 +367,7 @@ def make_client(
     enhancement: bool = True,
     summary: bool = False,
     identity: IdentityStore | None = None,
+    embedding_runtime: EmbeddingRuntime | None = None,
 ) -> AsyncClient:
     """HTTP client over a fake-wired app (see :func:`make_app`).
 
@@ -319,6 +384,7 @@ def make_client(
         enhancement=enhancement,
         summary=summary,
         identity=identity,
+        embedding_runtime=embedding_runtime,
     )
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
     client.app = app

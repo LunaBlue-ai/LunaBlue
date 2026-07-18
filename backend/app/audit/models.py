@@ -27,9 +27,24 @@ from sqlalchemy import (
     String,
     Text,
     TypeDecorator,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+def include_object_for_autogenerate(
+    obj: Any, name: str | None, type_: str, reflected: bool, compare_to: Any
+) -> bool:
+    """Alembic autogenerate filter shared by migrations/env.py and the
+    model/migration parity test.
+
+    The sqlite-vec virtual table (``vec_prompt_embeddings``) and its shadow
+    tables (``vec_prompt_embeddings_chunks`` etc.) live outside Alembic —
+    they are created at runtime by ``app.audit.vectors.ensure_schema`` —
+    so autogenerate must never see them as tables to drop.
+    """
+    return not (type_ == "table" and (name or "").startswith("vec_"))
 
 
 class TZDateTime(TypeDecorator):
@@ -133,6 +148,33 @@ class PromptResponse(Base):
     final_output: Mapped[str | None] = mapped_column(Text)
     model_id: Mapped[str | None] = mapped_column(String(128))
     usage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class PromptEmbedding(Base):
+    """Metadata for one stored embedding vector (prompt or response text).
+
+    The vector itself lives in the ``vec_prompt_embeddings`` sqlite-vec
+    virtual table with ``rowid == id`` (see ``app.audit.vectors``); this
+    table carries the relational metadata Alembic can manage. One embedding
+    per (request, kind): re-runs of the indexer/backfill are no-ops.
+    """
+
+    __tablename__ = "prompt_embeddings"
+    __table_args__ = (UniqueConstraint("request_id", "kind"),)
+
+    id: Mapped[int] = mapped_column(
+        BigIntPK, primary_key=True, autoincrement=True
+    )
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_requests.request_id", ondelete="CASCADE"),
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(16))  # "prompt" | "response"
+    model_id: Mapped[str | None] = mapped_column(String(128))
+    dims: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime(), server_default=func.now()
+    )
 
 
 class AgentEvent(Base):

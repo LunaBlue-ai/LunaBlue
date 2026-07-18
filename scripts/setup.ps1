@@ -219,20 +219,23 @@ if (Test-Path $envFile) {
     Write-Host ".env created from .env.example (defaults are fine for local use)."
 }
 
-# A verified GPU build defaults to full offload. Only the absent/0 cases
-# are touched - any other explicit LLM_GPU_LAYERS value is the user's.
+# A verified GPU build defaults to full offload for both the chat and the
+# embedding model. Only the absent/0 cases are touched - any other
+# explicit value is the user's.
 if ($gpuActive) {
-    $envLines = @(Get-Content $envFile)
-    $current = $envLines | Where-Object { $_ -match "^\s*LLM_GPU_LAYERS\s*=" } | Select-Object -First 1
-    if (-not $current) {
-        Add-Content -Path $envFile -Value "LLM_GPU_LAYERS=-1" -Encoding Ascii
-        Write-Host "LLM_GPU_LAYERS=-1 appended to .env (offload all layers to the GPU)."
-    } elseif ($current -match "^\s*LLM_GPU_LAYERS\s*=\s*0\s*$") {
-        $envLines = $envLines -replace "^\s*LLM_GPU_LAYERS\s*=\s*0\s*$", "LLM_GPU_LAYERS=-1"
-        Set-Content -Path $envFile -Value $envLines -Encoding Ascii
-        Write-Host "LLM_GPU_LAYERS changed 0 -> -1 in .env (offload all layers to the GPU)."
-    } else {
-        Write-Host ".env keeps your existing LLM_GPU_LAYERS value."
+    foreach ($gpuKey in @("LLM_GPU_LAYERS", "EMBEDDING_GPU_LAYERS")) {
+        $envLines = @(Get-Content $envFile)
+        $current = $envLines | Where-Object { $_ -match "^\s*$gpuKey\s*=" } | Select-Object -First 1
+        if (-not $current) {
+            Add-Content -Path $envFile -Value "$gpuKey=-1" -Encoding Ascii
+            Write-Host "$gpuKey=-1 appended to .env (offload all layers to the GPU)."
+        } elseif ($current -match "^\s*$gpuKey\s*=\s*0\s*$") {
+            $envLines = $envLines -replace "^\s*$gpuKey\s*=\s*0\s*$", "$gpuKey=-1"
+            Set-Content -Path $envFile -Value $envLines -Encoding Ascii
+            Write-Host "$gpuKey changed 0 -> -1 in .env (offload all layers to the GPU)."
+        } else {
+            Write-Host ".env keeps your existing $gpuKey value."
+        }
     }
 }
 

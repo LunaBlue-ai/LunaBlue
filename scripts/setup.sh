@@ -178,19 +178,22 @@ else
     echo ".env created from .env.example (defaults are fine for local use)."
 fi
 
-# A verified GPU build defaults to full offload. Only the absent/0 cases
-# are touched - any other explicit LLM_GPU_LAYERS value is the user's.
+# A verified GPU build defaults to full offload for both the chat and the
+# embedding model. Only the absent/0 cases are touched - any other
+# explicit value is the user's.
 if [ "$gpu_active" = 1 ]; then
-    if ! grep -q '^[[:space:]]*LLM_GPU_LAYERS[[:space:]]*=' "$env_file"; then
-        printf 'LLM_GPU_LAYERS=-1\n' >> "$env_file"
-        echo "LLM_GPU_LAYERS=-1 appended to .env (offload all layers to the GPU)."
-    elif grep -q '^[[:space:]]*LLM_GPU_LAYERS[[:space:]]*=[[:space:]]*0[[:space:]]*$' "$env_file"; then
-        sed 's/^[[:space:]]*LLM_GPU_LAYERS[[:space:]]*=[[:space:]]*0[[:space:]]*$/LLM_GPU_LAYERS=-1/' "$env_file" > "$env_file.tmp" \
-            && mv "$env_file.tmp" "$env_file"
-        echo "LLM_GPU_LAYERS changed 0 -> -1 in .env (offload all layers to the GPU)."
-    else
-        echo ".env keeps your existing LLM_GPU_LAYERS value."
-    fi
+    for gpu_key in LLM_GPU_LAYERS EMBEDDING_GPU_LAYERS; do
+        if ! grep -q "^[[:space:]]*$gpu_key[[:space:]]*=" "$env_file"; then
+            printf '%s=-1\n' "$gpu_key" >> "$env_file"
+            echo "$gpu_key=-1 appended to .env (offload all layers to the GPU)."
+        elif grep -q "^[[:space:]]*$gpu_key[[:space:]]*=[[:space:]]*0[[:space:]]*$" "$env_file"; then
+            sed "s/^[[:space:]]*$gpu_key[[:space:]]*=[[:space:]]*0[[:space:]]*$/$gpu_key=-1/" "$env_file" > "$env_file.tmp" \
+                && mv "$env_file.tmp" "$env_file"
+            echo "$gpu_key changed 0 -> -1 in .env (offload all layers to the GPU)."
+        else
+            echo ".env keeps your existing $gpu_key value."
+        fi
+    done
 fi
 
 if [ "$gpu_active" = 1 ]; then

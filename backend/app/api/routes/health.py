@@ -106,6 +106,29 @@ def _check_agent_runner(request: Request) -> dict[str, Any]:
     return {"ok": runner.alive, "detail": "ok" if runner.alive else "stopped"}
 
 
+def _check_embedding(request: Request) -> dict[str, Any]:
+    """Embedding runtime status. Always ``ok: True``: embeddings are an
+    optional enhancement, so an absent model degrades /api/search without
+    flipping overall readiness — the detail names the state for operators."""
+    runtime = getattr(request.app.state, "embedding_runtime", None)
+    if runtime is None:
+        return {"ok": True, "detail": "disabled"}
+    if not runtime.available:
+        return {
+            "ok": True,
+            "detail": "unavailable",
+            "error": runtime.last_error,
+        }
+    info = runtime.model_info
+    return {
+        "ok": True,
+        "detail": "loaded" if db.vec_available() else "vec_extension_missing",
+        "model_id": info["model_id"],
+        "dimensions": info["dimensions"],
+        "vec_extension": db.vec_available(),
+    }
+
+
 @router.get("/health/ready")
 async def get_readiness(request: Request) -> JSONResponse:
     """Report readiness with per-dependency detail (see module docstring).
@@ -120,6 +143,7 @@ async def get_readiness(request: Request) -> JSONResponse:
         "database": await _check_database(),
         "audit_queue": _check_audit_queue(request),
         "agent_runner": _check_agent_runner(request),
+        "embedding": _check_embedding(request),
     }
     ready = all(check["ok"] for check in checks.values())
     body = {

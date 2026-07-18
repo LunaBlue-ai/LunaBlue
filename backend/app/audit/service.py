@@ -121,11 +121,17 @@ class AuditService:
         *,
         redactor: Redactor | None = None,
         drop_log_interval: float = _DEFAULT_DROP_LOG_INTERVAL,
+        indexer: Any | None = None,
     ) -> None:
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max_queue_size)
         self._consumer: asyncio.Task[None] | None = None
         self._closed = False
         self._redactor = redactor
+        # Optional embedding indexer (duck-typed: .schedule(kind, request_id,
+        # text), never raises). Notified after a batch commits so embedded
+        # text is exactly the stored (post-redaction) text and the FK target
+        # row already exists.
+        self._indexer = indexer
         # Overflow accounting (Step 17): aggregate reporting plus the
         # counters readiness exposes.
         self._drop_log_interval = drop_log_interval
@@ -401,6 +407,24 @@ class AuditService:
             # Retry individually so one bad event can't sink the batch.
             for event in batch:
                 await self._write_batch([event])
+            return
+        self._notify_indexer(batch)
+
+    def _notify_indexer(self, batch: list[AuditEvent]) -> None:
+        """Schedule embeddings for committed prompt/response rows."""
+        if self._indexer is None:
+            return
+        for event in batch:
+            match event:
+                case PromptRequestEvent():
+                    self._indexer.schedule(
+                        "prompt", event.request_id, event.raw_prompt
+                    )
+                case PromptResponseEvent():
+                    # schedule() skips None text (failed runs).
+                    self._indexer.schedule(
+                        "response", event.request_id, event.final_output
+                    )
 
     @staticmethod
     def _statement(event: AuditEvent):

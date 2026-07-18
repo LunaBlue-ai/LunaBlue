@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, select
 
-from app.audit import db, models
+from app.audit import db, models, vectors
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,16 @@ async def apply_retention(
             name,
             " (dry run — nothing deleted)" if dry_run else " deleted",
         )
+    if not dry_run:
+        # Deleting prompt_requests cascades their prompt_embeddings rows,
+        # but the sqlite-vec virtual table is outside FK enforcement — sweep
+        # the now-orphaned vectors so the store cannot grow unbounded.
+        async with db.session_scope() as session:
+            orphans = await vectors.delete_orphan_vectors(session)
+        if orphans:
+            logger.info(
+                "retention: %d orphaned embedding vector(s) removed", orphans
+            )
     return affected
 
 

@@ -19,6 +19,7 @@ dependencies = [
     "alembic",
     "greenlet",
     "langgraph",
+    "sqlite-vec>=0.1.6",
 ]
 
 [project.optional-dependencies]

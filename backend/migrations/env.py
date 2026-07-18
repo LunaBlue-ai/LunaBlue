@@ -14,7 +14,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from app.audit.models import Base
+from app.audit.models import Base, include_object_for_autogenerate
 from app.config import get_settings
 
 config = context.config
@@ -57,6 +57,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object_for_autogenerate,
     )
 
     with context.begin_transaction():
@@ -68,6 +69,7 @@ def _run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_object=include_object_for_autogenerate,
     )
 
     with context.begin_transaction():

@@ -42,10 +42,18 @@ async def test_readiness_reports_every_check_when_degraded():
     body = resp.json()
     assert body["status"] == "unavailable"
     checks = body["checks"]
-    assert set(checks) == {"model", "database", "audit_queue", "agent_runner"}
+    assert set(checks) == {
+        "model",
+        "database",
+        "audit_queue",
+        "agent_runner",
+        "embedding",
+    }
     assert checks["model"]["ok"] is True
     assert checks["database"] == {"ok": False, "detail": "unreachable"}
     assert checks["audit_queue"]["ok"] is True
+    # Embeddings are an optional enhancement: absent runtime reports ok.
+    assert checks["embedding"] == {"ok": True, "detail": "disabled"}
     # make_app never starts the runner workers.
     assert checks["agent_runner"]["ok"] is False
     # Legacy fields survive for older consumers.

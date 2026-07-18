@@ -120,6 +120,20 @@ def _check_bounds(settings: Settings, problems: list[str]) -> None:
         "LLM_MAX_QUEUE_DEPTH must be >= 0 (0 disables the busy guard).",
     )
     require(
+        settings.embedding_gpu_layers >= -1,
+        "EMBEDDING_GPU_LAYERS must be >= -1 (-1 offloads all layers, "
+        "0 is CPU-only).",
+    )
+    require(
+        settings.embedding_context_size >= 1,
+        "EMBEDDING_CONTEXT_SIZE must be >= 1.",
+    )
+    require(
+        1 <= settings.embedding_dimensions <= 768,
+        "EMBEDDING_DIMENSIONS must be between 1 and 768 (the default "
+        "model's native size).",
+    )
+    require(
         settings.prompt_enhancement_max_tokens >= 1,
         "PROMPT_ENHANCEMENT_MAX_TOKENS must be >= 1.",
     )

@@ -142,7 +142,22 @@ async def audit_db(migrated_database) -> str:
         try:
             # Children first: SQLite has no TRUNCATE ... CASCADE.
             async with db.session_scope() as session:
+                # The sqlite-vec virtual table exists only once a vector
+                # test ran ensure_schema against the shared database.
+                vec_exists = (
+                    await session.execute(
+                        text(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='vec_prompt_embeddings'"
+                        )
+                    )
+                ).scalar()
+                if vec_exists:
+                    await session.execute(
+                        text("DELETE FROM vec_prompt_embeddings")
+                    )
                 for table in (
+                    "prompt_embeddings",
                     "agent_events",
                     "prompt_responses",
                     "prompt_requests",

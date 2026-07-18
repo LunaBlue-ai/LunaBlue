@@ -20,6 +20,17 @@ Why this model:
 - **Quality:** a capable instruct-tuned model for its size, with a 4k context
   window matching the `LLM_CONTEXT_SIZE` default.
 
+## Embedding model
+
+`scripts/download_embedding_model.ps1` / `.sh` fetches
+[nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF)
+(Q8 quantization, ~140 MB, Apache-2.0) as `models/embedding.gguf` — the
+`EMBEDDING_MODEL_PATH` default. It powers semantic search over stored
+prompts/responses (see backend/README.md, "Embeddings & semantic search").
+Optional: without the file the backend still boots and only `/api/search`
+is unavailable. If you substitute another embedding GGUF, re-run
+`scripts/backfill_embeddings` so old and new vectors are not mixed.
+
 ## Substituting another model
 
 Any chat/instruct GGUF that `llama.cpp` supports works:
