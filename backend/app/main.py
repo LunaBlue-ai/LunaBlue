@@ -20,7 +20,11 @@ from app.audit.service import AuditService
 from app.config import get_settings
 from app.governance.intake import PromptIntake
 from app.governance.policy import PolicyEngine
-from app.llm.runtime import LlamaRuntime, ModelNotFoundError
+from app.llm.runtime import (
+    LlamaRuntime,
+    LlamaRuntimeUnavailableError,
+    ModelNotFoundError,
+)
 from app.orchestration.pipeline import PromptPipeline
 from app.orchestration.runner import AgentRunner
 from app.orchestration.summarizer import SessionSummarizer
@@ -98,8 +102,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.prompt_intake = intake
     # The single global LLM runtime (docs/Architecture.md). Loading is
-    # deliberately fail-fast: a missing model file aborts startup with an
-    # actionable message rather than serving a half-alive process.
+    # deliberately fail-fast: a missing model file or an unloadable
+    # llama-cpp-python build (e.g. a CUDA wheel mismatching the driver)
+    # aborts startup with an actionable message rather than serving a
+    # half-alive process.
     runtime = LlamaRuntime(
         model_path=str(settings.resolved_model_path),
         context_size=settings.llm_context_size,
@@ -110,7 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     try:
         runtime.load()
-    except ModelNotFoundError as exc:
+    except (ModelNotFoundError, LlamaRuntimeUnavailableError) as exc:
         logger.error("%s", exc)
         # Tear down what startup already built; the finally below never runs
         # when startup itself raises.

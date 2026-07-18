@@ -29,14 +29,34 @@ scripts/download_model.sh      # Unix / macOS
 
 ### Install variants
 
-`scripts/setup` installs the **prebuilt CPU wheel** of `llama-cpp-python` from the project's wheel index (`--only-binary=:all: --index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --extra-index-url https://pypi.org/simple`) — no toolchain needed, works everywhere. A bare `pip install -e "backend[dev,llm]"` may instead resolve to the PyPI **sdist** and build from source; on Windows that needs CMake + Visual Studio Build Tools **and** long paths enabled — an `OSError: [Errno 2] No such file or directory` on a deep `...\vendor\llama.cpp\...` path during install is the long-path (260-char `MAX_PATH`) symptom, not a missing file. Prefer the wheel-index command above; enabling `LongPathsEnabled=1` in the registry is only needed if you genuinely want a source build.
+`scripts/setup` picks the right **prebuilt wheel** of `llama-cpp-python` automatically — re-running setup is the fix for most install/GPU problems:
 
-To offload layers to a GPU (`LLM_GPU_LAYERS` > 0), reinstall `llama-cpp-python` with the matching backend enabled at build time:
+- On NVIDIA machines it reads the driver's maximum supported CUDA version from `nvidia-smi` ("CUDA Version" in the banner) and installs the matching CUDA wheel **plus the CUDA runtime from pip** (`nvidia-cuda-runtime-*`, `nvidia-cublas-*`) — no CUDA toolkit install needed. On a successful GPU install it also sets `LLM_GPU_LAYERS=-1` in `.env` (unless you already customized it).
+- Everywhere else (or when the driver is too old) it installs the CPU wheel.
+- Broken installs self-repair: setup probes the installed build (`app.llm.native.probe_install_state`) and force-reinstalls when it doesn't match the machine; if a GPU wheel fails to initialize, setup falls back to the CPU wheel with a warning.
+
+| `nvidia-smi` "CUDA Version" | driver (approx.) | wheel index | CUDA runtime packages |
+|---|---|---|---|
+| >= 13.0 | 580+ | `whl/cu130` | `nvidia-cuda-runtime-cu13`, `nvidia-cublas-cu13` |
+| 12.4 – 12.x | ~551+ | `whl/cu124` | `nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12` |
+| < 12.4 | older | CPU wheel | — (update the driver, then re-run setup) |
+
+All installs use `--only-binary=:all:`: a bare `pip install -e "backend[dev,llm]"` may instead resolve to the PyPI **sdist** and build from source; on Windows that needs CMake + Visual Studio Build Tools **and** long paths enabled — an `OSError: [Errno 2] No such file or directory` on a deep `...\vendor\llama.cpp\...` path during install is the long-path (260-char `MAX_PATH`) symptom, not a missing file. Enabling `LongPathsEnabled=1` in the registry is only needed if you genuinely want a source build.
+
+To install a CUDA tier manually (PowerShell shown; swap `cu124`→`cu130` and `-cu12`→`-cu13` per the table):
+
+```powershell
+pip install --only-binary=:all: nvidia-cuda-runtime-cu12 nvidia-cublas-cu12
+pip install llama-cpp-python --force-reinstall --no-cache-dir --only-binary=:all: `
+    --index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 `
+    --extra-index-url https://pypi.org/simple
+```
+
+(`--only-binary=:all:` stops pip from "helpfully" falling back to a CPU source build. Verify with `python -c "from app.llm.native import probe_install_state; print(probe_install_state())"` — `gpu` means llama.cpp reports offload support.)
+
+For non-NVIDIA GPUs, build from source with the matching backend enabled (needs CMake + a C++ toolchain, plus the SDK for the variant):
 
 ```bash
-# CUDA (NVIDIA)
-CMAKE_ARGS="-DGGML_CUDA=on" pip install --force-reinstall --no-cache-dir llama-cpp-python
-
 # Metal (Apple Silicon)
 CMAKE_ARGS="-DGGML_METAL=on" pip install --force-reinstall --no-cache-dir llama-cpp-python
 
@@ -44,19 +64,9 @@ CMAKE_ARGS="-DGGML_METAL=on" pip install --force-reinstall --no-cache-dir llama-
 CMAKE_ARGS="-DGGML_HIPBLAS=on" pip install --force-reinstall --no-cache-dir llama-cpp-python
 ```
 
-On Windows (PowerShell) set the variable first: `$env:CMAKE_ARGS = "-DGGML_CUDA=on"`. Source builds need CMake and a C++ toolchain (plus the CUDA/ROCm SDK for those variants).
+On Windows (PowerShell) set the variable first: `$env:CMAKE_ARGS = "-DGGML_METAL=on"`.
 
-Prebuilt CUDA wheels avoid the toolchain entirely. Two things must line up: the wheel's CUDA series must match the CUDA runtime installed on the machine (check `nvidia-smi` / `$env:CUDA_PATH` — a `cu124` wheel needs the 12.x runtime DLLs, `cu130` the 13.x ones), and pip needs the wheel index for `llama-cpp-python` itself plus PyPI for its dependencies:
-
-```powershell
-pip install llama-cpp-python --force-reinstall --no-cache-dir --only-binary=:all: `
-    --index-url https://abetlen.github.io/llama-cpp-python/whl/cu130 `
-    --extra-index-url https://pypi.org/simple
-```
-
-(`--only-binary=:all:` stops pip from "helpfully" falling back to a CPU source build. Verify with `python -c "import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"`.)
-
-The runtime probes this at startup: requesting `LLM_GPU_LAYERS` != 0 on a CPU-only build logs a warning (llama.cpp would otherwise silently run on CPU), and `/api/health/ready` reports the capability as `gpu_offload_supported` in the model check.
+Startup behavior: requesting `LLM_GPU_LAYERS` != 0 on a CPU-only build logs a warning (llama.cpp would otherwise silently run on CPU), and `/api/health/ready` reports the capability as `gpu_offload_supported` in the model check. An installed build that fails to **import** (e.g. a `cu130` wheel on a driver that only supports CUDA 12.x) aborts startup with an actionable `LlamaRuntimeUnavailableError` instead of a raw traceback — re-run `scripts/setup` to repair it.
 
 ## Run
 

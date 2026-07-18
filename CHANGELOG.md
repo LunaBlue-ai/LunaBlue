@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Automatic GPU wheel selection: setup scripts now detect the NVIDIA
+  driver's maximum supported CUDA version (from the `nvidia-smi` banner)
+  and install the matching prebuilt `llama-cpp-python` CUDA wheel — `cu130`
+  for drivers supporting CUDA 13+, `cu124` for 12.4+, CPU wheel otherwise
+  with a driver-update hint. Fixes GPU inference on machines whose driver
+  predates CUDA 13 (previously the docs hardcoded the `cu130` index, which
+  cannot initialize there). The CUDA runtime now comes from pip
+  (`nvidia-cuda-runtime-*`, `nvidia-cublas-*`) — no CUDA toolkit install
+  required; `app.llm.native` registers those library dirs before importing
+  `llama_cpp` (`os.add_dll_directory` on Windows, `RTLD_GLOBAL` preload on
+  Linux). Setup verifies the installed build actually reports GPU offload
+  support (falling back to the CPU wheel with a warning if not), repairs
+  mismatched/broken installs on re-run, and sets `LLM_GPU_LAYERS=-1` in
+  `.env` after a verified GPU install (absent/0 values only). An installed
+  build that fails to import now aborts startup with an actionable
+  `LlamaRuntimeUnavailableError` (check `nvidia-smi`, re-run setup) instead
+  of a raw traceback.
 - Setup scripts now install `llama-cpp-python` from the project's prebuilt
   CPU wheel index with `--only-binary=:all:` (skipped when any build — e.g.
   a GPU wheel — is already present). Fixes installs on machines where PyPI

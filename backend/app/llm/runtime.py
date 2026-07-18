@@ -30,6 +30,8 @@ from typing import Any, Callable
 
 from fastapi import Request
 
+from app.llm import native
+
 logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -44,8 +46,8 @@ def _probe_gpu_offload_support() -> bool | None:
     :meth:`LlamaRuntime.load` warns on.
     """
     try:
-        import llama_cpp
-    except ImportError:
+        llama_cpp = native.import_llama()
+    except (ImportError, OSError):
         return None
     try:
         return bool(llama_cpp.llama_supports_gpu_offload())
@@ -140,6 +142,27 @@ class ModelNotFoundError(RuntimeError):
         self.model_path = model_path
 
 
+class LlamaRuntimeUnavailableError(RuntimeError):
+    """llama-cpp-python is installed but failed to import.
+
+    The usual cause is a CUDA wheel whose runtime libraries or driver do
+    not match the machine (e.g. a cu130 wheel on a driver that only
+    supports CUDA 12.x). Fail-fast on purpose: silently falling back to
+    CPU would leave the operator believing the GPU is in use.
+    """
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(
+            "llama-cpp-python failed to load: "
+            f"{type(cause).__name__}: {cause}. On NVIDIA machines this "
+            "usually means the installed CUDA build does not match your "
+            "driver - run nvidia-smi: the 'CUDA Version' it reports is the "
+            "maximum your driver supports. Re-run scripts/setup.ps1 (or "
+            ".sh) to install the matching build, or update your NVIDIA "
+            "driver."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationResult:
     """One completed generation plus the metadata the audit layer persists."""
@@ -222,10 +245,13 @@ class LlamaRuntime:
         probe = self._gpu_support_probe
         if factory is None:
             # llama_cpp is only ever imported inside app.llm (here and in
-            # _probe_gpu_offload_support).
-            from llama_cpp import Llama
+            # _probe_gpu_offload_support, both via native.import_llama).
+            try:
+                llama_cpp = native.import_llama()
+            except (ImportError, OSError) as exc:
+                raise LlamaRuntimeUnavailableError(exc) from exc
 
-            factory = Llama
+            factory = llama_cpp.Llama
             probe = probe or _probe_gpu_offload_support
         # With an injected factory and no injected probe the capability stays
         # None (unknown): fakes never import llama_cpp.

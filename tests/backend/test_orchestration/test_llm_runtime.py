@@ -12,10 +12,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.audit import db
+from app.llm import native
 from app.llm.runtime import (
     GenerationResult,
     GenerationTimeoutError,
     LlamaRuntime,
+    LlamaRuntimeUnavailableError,
     ModelNotFoundError,
     load_system_prompt,
 )
@@ -183,6 +185,28 @@ def test_no_warning_when_offload_matches_config(
         "GPU offload" in record.message for record in caplog.records
     )
     assert runtime.model_info["gpu_offload_supported"] is probe_result
+
+
+def test_unimportable_llama_cpp_fails_fast_with_actionable_error(
+    tmp_path, monkeypatch
+):
+    """A CUDA wheel that cannot load (driver/runtime mismatch) must abort
+    startup with instructions, not a raw traceback — and never silently
+    fall back to CPU."""
+    (tmp_path / "model.gguf").touch()
+
+    def broken_import():
+        raise OSError("DLL load failed while importing llama_cpp")
+
+    monkeypatch.setattr(native, "import_llama", broken_import)
+    runtime = LlamaRuntime(model_path=str(tmp_path / "model.gguf"))
+    with pytest.raises(LlamaRuntimeUnavailableError) as exc_info:
+        runtime.load()
+    assert not runtime.loaded
+    message = str(exc_info.value)
+    assert "nvidia-smi" in message
+    assert "scripts/setup" in message
+    assert "DLL load failed" in message
 
 
 def test_system_prompt_template_loads():
