@@ -1,51 +1,48 @@
-# LunaBlue Model Metadata Template
+# Models
 
-This directory contains GGUF models and their metadata files.
+Local GGUF model files for the in-process `llama-cpp-python` runtime live in
+this directory. Model binaries (`*.gguf`, `*.bin`) are **gitignored** — they
+are large and must never be committed.
 
-## File Structure
+## Default model
 
-Each model should have:
-- `model.gguf` - The actual GGUF model file
-- `model.metadata.json` - ModelMetadata describing the model
+`scripts/download_model.ps1` (Windows) / `scripts/download_model.sh` (Unix)
+fetches [Phi-3-mini-4k-instruct](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf)
+(Q4 quantization, ~2.3 GB) from Microsoft's official Hugging Face repository
+and saves it as `models/model.gguf` — the `MODEL_PATH` default in
+[.env.example](../.env.example).
 
-## Adding a Model
+Why this model:
 
-1. Place the `.gguf` file in this directory
-2. Create a `model.metadata.json` file using the template below
-3. Update `config/models.config.json` to reference the model
+- **License:** MIT — permissive, no gated access or account required.
+- **Size:** 3.8B parameters at Q4 runs acceptably on CPU-only machines with
+  ~4 GB of free RAM.
+- **Quality:** a capable instruct-tuned model for its size, with a 4k context
+  window matching the `LLM_CONTEXT_SIZE` default.
 
-## Metadata Template Example
+## Embedding model
 
-```json
-{
-  "metadata": {
-    "model_id": "phi-3-mini-4k-instruct",
-    "name": "Phi-3 Mini (4K Context)",
-    "description": "3.8B parameter quantized model optimized for small hardware",
-    "version": "1.0.0",
-    "release_date": "2024-04-18"
-  },
-  "specifications": {
-    "parameters": "3.8B",
-    "context_window": 4096,
-    "architecture": "Transformer",
-    "quantization": "Q4_K_M",
-    "quantization_bits": 4,
-    "file_size_gb": 2.0,
-    "format": "GGUF"
-  },
-  "performance": {
-    "min_memory_gb": 4,
-    "recommended_memory_gb": 8,
-    "tokens_per_second_cpu": 10,
-    "tokens_per_second_gpu": 50,
-    "latency_ms_cpu": 100,
-    "latency_ms_gpu": 20
-  },
-  "source": {
-    "organization": "Microsoft",
-    "repository_url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf",
-    "license": "MIT"
-  }
-}
-```
+`scripts/download_embedding_model.ps1` / `.sh` fetches
+[nomic-embed-text-v1.5](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF)
+(Q8 quantization, ~140 MB, Apache-2.0) as `models/embedding.gguf` — the
+`EMBEDDING_MODEL_PATH` default. It powers semantic search over stored
+prompts/responses (see backend/README.md, "Embeddings & semantic search").
+Optional: without the file the backend still boots and only `/api/search`
+is unavailable. If you substitute another embedding GGUF, re-run
+`scripts/backfill_embeddings` so old and new vectors are not mixed.
+
+## Substituting another model
+
+Any chat/instruct GGUF that `llama.cpp` supports works:
+
+1. Download the `.gguf` file into this directory (or pass a URL to the
+   download script: `scripts/download_model.sh <url>`).
+2. Point `MODEL_PATH` in your `.env` at the file.
+3. Adjust `LLM_CONTEXT_SIZE` to the model's context window and
+   `LLM_GPU_LAYERS` if you built `llama-cpp-python` with GPU support (see
+   [backend/README.md](../backend/README.md) for GPU build variants).
+4. Restart the backend — the model loads once at startup, and startup fails
+   with a clear error if the file is missing.
+
+Check the license of any model you substitute; not all GGUF builds are
+permissively licensed.
