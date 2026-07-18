@@ -12,10 +12,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.audit import db
+from app.llm import native
 from app.llm.runtime import (
     GenerationResult,
     GenerationTimeoutError,
     LlamaRuntime,
+    LlamaRuntimeUnavailableError,
     ModelNotFoundError,
     load_system_prompt,
 )
@@ -142,10 +144,69 @@ def test_model_info_and_loaded_flag(tmp_path):
     assert info["model_id"] == "model.gguf"
     assert info["context_size"] == 1024
     assert info["loaded"] is True
+    # No probe injected and no llama_cpp import: capability is unknown.
+    assert info["gpu_offload_supported"] is None
 
     runtime.close()
     assert not runtime.loaded
     assert fake.closed
+
+
+def test_cpu_only_build_with_gpu_layers_warns(tmp_path, caplog):
+    """A CPU-only llama-cpp-python build silently ignores n_gpu_layers; the
+    runtime must surface that instead of letting inference quietly run on
+    CPU (the exact failure mode this guard exists for)."""
+    with caplog.at_level("WARNING", logger="app.llm.runtime"):
+        runtime, _ = make_runtime(
+            tmp_path, gpu_layers=-1, gpu_support_probe=lambda: False
+        )
+    assert any(
+        "no GPU offload support" in record.message for record in caplog.records
+    )
+    assert runtime.model_info["gpu_offload_supported"] is False
+
+
+@pytest.mark.parametrize(
+    ("gpu_layers", "probe_result"),
+    [
+        (0, False),  # CPU-only requested: nothing to warn about
+        (-1, True),  # GPU requested and the build supports it
+        (5, None),  # capability unknown (no llama_cpp): stay silent
+    ],
+)
+def test_no_warning_when_offload_matches_config(
+    tmp_path, caplog, gpu_layers, probe_result
+):
+    with caplog.at_level("WARNING", logger="app.llm.runtime"):
+        runtime, _ = make_runtime(
+            tmp_path, gpu_layers=gpu_layers, gpu_support_probe=lambda: probe_result
+        )
+    assert not any(
+        "GPU offload" in record.message for record in caplog.records
+    )
+    assert runtime.model_info["gpu_offload_supported"] is probe_result
+
+
+def test_unimportable_llama_cpp_fails_fast_with_actionable_error(
+    tmp_path, monkeypatch
+):
+    """A CUDA wheel that cannot load (driver/runtime mismatch) must abort
+    startup with instructions, not a raw traceback — and never silently
+    fall back to CPU."""
+    (tmp_path / "model.gguf").touch()
+
+    def broken_import():
+        raise OSError("DLL load failed while importing llama_cpp")
+
+    monkeypatch.setattr(native, "import_llama", broken_import)
+    runtime = LlamaRuntime(model_path=str(tmp_path / "model.gguf"))
+    with pytest.raises(LlamaRuntimeUnavailableError) as exc_info:
+        runtime.load()
+    assert not runtime.loaded
+    message = str(exc_info.value)
+    assert "nvidia-smi" in message
+    assert "scripts/setup" in message
+    assert "DLL load failed" in message
 
 
 def test_system_prompt_template_loads():
@@ -242,6 +303,7 @@ async def test_readiness_reports_model_state(tmp_path):
 async def test_health_liveness_answers_while_generation_runs(tmp_path):
     runtime, fake = make_runtime(tmp_path)
     fake.block_seconds = 0.2
+    fake.queued_responses = ["busy"]  # enhancement call passes through
     app = make_app(FakeAuditService(), runtime)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"

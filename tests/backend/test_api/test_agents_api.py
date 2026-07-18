@@ -1,6 +1,6 @@
 """Tests for the agent status endpoints (Step 15).
 
-The app is wired with fakes (no Postgres, no model file); the state store and
+The app is wired with fakes (no database, no model file); the state store and
 the AgentRunner are real, so these tests cover the full spawn → live status →
 settle → evict → audit-reconstruction loop the UI depends on.
 """

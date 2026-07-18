@@ -11,7 +11,7 @@ Create the solution repo using the directory structure in [Architecture.md](Arch
 Build the FastAPI app factory (`main.py`), settings via pydantic-settings (`config.py`), and a health endpoint. *Checkpoint: the service starts and `/api/health` responds.*
 
 **Step 3. Provision Postgres and the schema.**
-Add Postgres to `docker-compose.yml`, create the SQLAlchemy engine and session management (`audit/db.py`), initialize Alembic, and write the first migration for `prompt_requests`, `prompt_responses`, `agent_events`, and `sessions`. *Checkpoint: `scripts/migrate` creates the schema in a local Postgres.*
+Add Postgres to `docker-compose.yml`, create the SQLAlchemy engine and session management (`audit/db.py`), initialize Alembic, and write the first migration for `prompt_requests`, `prompt_responses`, `agent_events`, and `sessions`. *Checkpoint: `scripts/migrate` creates the schema in a local Postgres.* *(Superseded post-v1.0 by [Step 21](Steps/Step21-SqliteMigration.md): the audit database is now file-based SQLite — no Docker.)*
 
 **Step 4. Build the audit service.**
 Implement the SQLAlchemy models (`audit/models.py`) and the structured audit writer (`audit/service.py`), writing off the hot path. *Checkpoint: a test event lands in Postgres without blocking a request.*

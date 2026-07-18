@@ -70,7 +70,7 @@ def test_invalid_custom_pattern_raises_at_construction():
 
 async def test_service_redacts_prompt_fields_before_enqueueing():
     """The queued event already holds redacted text — the original never
-    reaches the queue, the consumer, or Postgres."""
+    reaches the queue, the consumer, or the database."""
     service = AuditService(redactor=Redactor())  # consumer never started
     service.record_prompt_request(
         "r-1",
@@ -98,7 +98,7 @@ async def test_service_without_redactor_stores_text_verbatim():
     assert event.raw_prompt == "key sk-abc123DEF456ghi789jkl"
 
 
-async def test_redacted_prompt_lands_redacted_in_postgres(audit_db):
+async def test_redacted_prompt_lands_redacted_in_the_database(audit_db):
     """Step 17 verification: a prompt containing a fake API key is stored
     redacted in prompt_requests when redaction is enabled."""
     import uuid

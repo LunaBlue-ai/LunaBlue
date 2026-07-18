@@ -341,7 +341,7 @@ async def test_graph_detours_through_agent_spawn_and_mentions_the_agent(tmp_path
     runner = AgentRunner(runtime=runtime, store=store, audit=audit)
     # Deliberately not started: spawn only enqueues, proving respond never
     # waits on agent execution.
-    fake.queued_responses = [_REVIEW_WANTS_AGENT]
+    fake.queued_responses = ["research this topic", _REVIEW_WANTS_AGENT]
     await store.start_run("req-1", "sess-1")
     graph = build_main_graph(runtime, store, runner)
 
@@ -352,11 +352,12 @@ async def test_graph_detours_through_agent_spawn_and_mentions_the_agent(tmp_path
     assert agent_id not in state["draft_output"]
     assert [d["node"] for d in state["decisions"]] == [
         "prompt_engineering",
+        "prompt_enhancement",
         "llm_review",
         "agent_spawn",
         "respond",
     ]
-    spawn_decision = state["decisions"][2]
+    spawn_decision = state["decisions"][3]
     assert spawn_decision["outcome"] == "spawned"
     assert spawn_decision["agent_id"] == agent_id
     assert spawn_decision["kind"] == "research"
@@ -364,6 +365,7 @@ async def test_graph_detours_through_agent_spawn_and_mentions_the_agent(tmp_path
     assert [p.phase for p in store.get_run("req-1").phases] == [
         "received",
         "engineering",
+        "enhancing",
         "reviewing",
         "spawning",
         "responding",
@@ -372,8 +374,9 @@ async def test_graph_detours_through_agent_spawn_and_mentions_the_agent(tmp_path
     assert store.get_agent(agent_id).state == "pending"
     assert store.get_agent(agent_id).request_id == "req-1"
     assert [e["event_type"] for e in audit.events_for(agent_id)] == ["spawned"]
-    # Exactly two foreground LLM calls: review and respond — no agent work.
-    assert len(fake.calls) == 2
+    # Exactly three foreground LLM calls: enhance, review, and respond — no
+    # agent work.
+    assert len(fake.calls) == 3
 
 
 async def test_graph_goes_straight_to_respond_when_no_background_work(tmp_path):
@@ -382,7 +385,7 @@ async def test_graph_goes_straight_to_respond_when_no_background_work(tmp_path):
     runner = AgentRunner(
         runtime=runtime, store=store, audit=FakeAuditService()
     )
-    fake.queued_responses = [_REVIEW_DIRECT]
+    fake.queued_responses = ["research this topic", _REVIEW_DIRECT]
     graph = build_main_graph(runtime, store, runner)
 
     state = await graph.ainvoke(make_graph_state())
@@ -391,6 +394,7 @@ async def test_graph_goes_straight_to_respond_when_no_background_work(tmp_path):
     assert state["final_output"] == state["draft_output"]
     assert [d["node"] for d in state["decisions"]] == [
         "prompt_engineering",
+        "prompt_enhancement",
         "llm_review",
         "respond",
     ]
@@ -404,7 +408,7 @@ async def test_spawn_failure_is_non_fatal_and_recorded(tmp_path):
     runner = AgentRunner(
         runtime=runtime, store=store, audit=FakeAuditService(), agent_types={}
     )
-    fake.queued_responses = [_REVIEW_WANTS_AGENT]
+    fake.queued_responses = ["research this topic", _REVIEW_WANTS_AGENT]
     graph = build_main_graph(runtime, store, runner)
 
     state = await graph.ainvoke(make_graph_state())
@@ -420,7 +424,7 @@ async def test_spawn_failure_is_non_fatal_and_recorded(tmp_path):
 
 async def test_graph_without_a_runner_never_detours(tmp_path):
     runtime, fake = make_runtime(tmp_path)
-    fake.queued_responses = [_REVIEW_WANTS_AGENT]
+    fake.queued_responses = ["research this topic", _REVIEW_WANTS_AGENT]
     graph = build_main_graph(runtime)  # no runner bound
 
     state = await graph.ainvoke(make_graph_state())
@@ -428,6 +432,7 @@ async def test_graph_without_a_runner_never_detours(tmp_path):
     assert "spawned_agent_id" not in state
     assert [d["node"] for d in state["decisions"]] == [
         "prompt_engineering",
+        "prompt_enhancement",
         "llm_review",
         "respond",
     ]

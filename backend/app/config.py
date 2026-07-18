@@ -26,9 +26,10 @@ class Settings(BaseSettings):
         protected_namespaces=(),
     )
 
-    database_url: str = (
-        "postgresql+asyncpg://lunablue:lunablue@localhost:5432/lunablue"
-    )
+    # SQLAlchemy URL for the audit database (Step 21: file-based SQLite).
+    # Relative paths are anchored at the repository root — see
+    # resolved_database_url.
+    database_url: str = "sqlite+aiosqlite:///./data/lunablue.db"
     model_path: str = "./models/model.gguf"
     llm_context_size: int = 4096
     llm_gpu_layers: int = 0
@@ -40,6 +41,34 @@ class Settings(BaseSettings):
     # Busy guard: reject new prompts with 503 when this many generations are
     # already queued/in flight on the runtime; 0 disables the guard.
     llm_max_queue_depth: int = 16
+    # Embeddings: a second small GGUF model embeds stored prompts/responses
+    # for semantic search (sqlite-vec). Optional enhancement — a missing
+    # model degrades with a warning instead of blocking startup.
+    embedding_enabled: bool = True
+    embedding_model_path: str = "./models/embedding.gguf"
+    embedding_context_size: int = 2048
+    embedding_gpu_layers: int = 0
+    # Stored vector size. The default model (nomic-embed-text-v1.5) is
+    # Matryoshka-trained: its 768-dim output truncates to 512 with
+    # near-identical retrieval quality at 2/3 the storage.
+    embedding_dimensions: int = 512
+    # Closed-loop prompt processing: internal LLM prompt enhancement before
+    # review, and the per-session rolling chat summary injected into it.
+    # Both are internal-only — never exposed to the user.
+    prompt_enhancement_enabled: bool = True
+    prompt_enhancement_max_tokens: int = 512
+    session_summary_enabled: bool = True
+    session_summary_max_chars: int = 2000
+    session_summary_max_tokens: int = 600
+    # Identity fields pinned into every injected chat summary (Step 20):
+    # stored outside the LLM-maintained rolling buffer, so they survive
+    # resets and re-summarization. Runtime-editable via PUT /api/identity
+    # (in-memory override). Only take effect while session_summary_enabled.
+    identity_name: str = ""
+    identity_age: str = ""
+    identity_occupation: str = ""
+    identity_personality: str = ""
+    identity_interests: str = ""
     host: str = "127.0.0.1"
     port: int = 8000
     ws_enabled: bool = True
@@ -75,6 +104,40 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @property
+    def resolved_database_path(self) -> Path | None:
+        """The SQLite database file as an absolute path (None for non-SQLite
+        URLs).
+
+        Relative paths (the default ``./data/lunablue.db``) are anchored at
+        the repository root, not the process CWD — uvicorn is normally
+        launched from ``backend/``, which would otherwise silently create
+        ``backend/data/``. Mirrors :attr:`resolved_model_path`.
+        """
+        from sqlalchemy.engine import make_url
+
+        url = make_url(self.database_url)
+        if url.get_backend_name() != "sqlite" or not url.database:
+            return None
+        path = Path(url.database)
+        return path if path.is_absolute() else (_REPO_ROOT / path).resolve()
+
+    @property
+    def resolved_database_url(self) -> str:
+        """``database_url`` with a relative SQLite path made absolute.
+
+        Built with ``as_posix()`` so Windows drive-letter paths keep the
+        ``sqlite+aiosqlite:///C:/...`` form. Non-SQLite and absolute-path
+        URLs pass through unchanged.
+        """
+        path = self.resolved_database_path
+        if path is None:
+            return self.database_url
+        from sqlalchemy.engine import make_url
+
+        url = make_url(self.database_url).set(database=path.as_posix())
+        return url.render_as_string(hide_password=False)
+
+    @property
     def resolved_model_path(self) -> Path:
         """``model_path`` as an absolute path.
 
@@ -84,6 +147,13 @@ class Settings(BaseSettings):
         look in ``backend/models/``.
         """
         path = Path(self.model_path)
+        return path if path.is_absolute() else (_REPO_ROOT / path).resolve()
+
+    @property
+    def resolved_embedding_model_path(self) -> Path:
+        """``embedding_model_path`` as an absolute path (repo-root anchored,
+        mirroring :attr:`resolved_model_path`)."""
+        path = Path(self.embedding_model_path)
         return path if path.is_absolute() else (_REPO_ROOT / path).resolve()
 
 

@@ -1,7 +1,7 @@
 """Tests for serving the built frontend from FastAPI (Step 12).
 
 The static routes never touch ``app.state``, so a bare ``create_app`` over a
-fabricated bundle directory is enough — no fakes, no Postgres, no model.
+fabricated bundle directory is enough — no fakes, no database, no model.
 """
 
 import pytest

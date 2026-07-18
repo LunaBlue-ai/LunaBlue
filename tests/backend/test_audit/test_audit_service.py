@@ -1,6 +1,6 @@
 """Integration tests for the audit service.
 
-These run against the docker-compose test Postgres via the ``audit_db``
+These run against the suite's temp-file SQLite database via the ``audit_db``
 fixture (skipped with instructions when it is unreachable): they emit one of
 each event type and assert the rows land, and exercise the failure/overflow/
 shutdown policies from ``service.py``.
@@ -19,14 +19,22 @@ from app.audit.service import AuditService
 
 
 @pytest.fixture
-async def broken_engine():
-    """Engine pointing at a port nothing listens on: every write fails."""
-    db.init_engine("postgresql+asyncpg://nobody:nothing@127.0.0.1:1/nowhere")
+async def broken_engine(tmp_path):
+    """Engine pointing at an impossible database path: every write fails.
+
+    The "directory" component of the path is actually a file, so SQLite can
+    never create or open the database.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    db.init_engine(
+        f"sqlite+aiosqlite:///{(blocker / 'nowhere.db').as_posix()}"
+    )
     yield
     await db.dispose_engine()
 
 
-async def test_all_event_types_land_in_postgres(audit_db):
+async def test_all_event_types_land_in_the_database(audit_db):
     ids = uuid.uuid4().hex[:12]
     session_id, request_id, agent_id = f"s-{ids}", f"r-{ids}", f"a-{ids}"
 
@@ -122,7 +130,7 @@ async def test_close_drains_pending_events(audit_db):
 async def test_record_is_nonblocking_and_failures_stay_off_request_path(
     broken_engine, caplog
 ):
-    """With Postgres unreachable, record_* still returns instantly and the
+    """With the database unwritable, record_* still returns instantly and the
     consumer logs the failed write instead of raising."""
     service = AuditService()
     service.start()

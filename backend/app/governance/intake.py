@@ -88,7 +88,7 @@ class PromptIntake:
         self._max_length = max_length
         # Per-session resubmission counters. In-memory and per-process by
         # design: prompt_version is a review sequence number, not a durable
-        # identifier (the audit trail in Postgres is the durable record).
+        # identifier (the audit database is the durable record).
         self._versions: dict[str, int] = {}
 
     def review(self, raw_text: str, context: IntakeContext) -> ReviewedPrompt:

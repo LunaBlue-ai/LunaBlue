@@ -10,7 +10,7 @@ This repository holds the documentation for designing and building LunaBlue.
 - **Companion, not just a chatbot.** The LLM coordinates work — planning, spawning background agents, and resolving tasks — rather than only generating direct answers.
 - **One self-contained service.** A single FastAPI process serves the React UI, runs LangGraph orchestration, and executes the model in-process.
 - **Live and transparent.** Runtime state is pushed to the UI over WebSockets, so users can watch prompts, agents, and progress in real time.
-- **Auditable by design.** Every prompt request, reviewed prompt, response, and governance decision is persisted to Postgres for traceability.
+- **Auditable by design.** Every prompt request, reviewed prompt, response, and governance decision is persisted to a local SQLite database for traceability.
 
 ## Architecture at a glance
 
@@ -21,9 +21,9 @@ This repository holds the documentation for designing and building LunaBlue.
 | Orchestration | LangGraph | Main request graph and background agent subgraphs |
 | Model runtime | `llama-cpp-python` | Single in-process local LLM instance |
 | State | In-memory | Session, graph, and agent state, streamed to the UI |
-| Audit | Postgres | Durable log of prompts, responses, and decisions |
+| Audit | SQLite | Durable log of prompts, responses, and decisions |
 
-How a request flows: the user submits a prompt in the React UI → FastAPI ingests, governs, and logs it → the LangGraph orchestrator runs prompt engineering, LLM review, and any agent spawning in-process → live state streams to the UI over WebSockets → the response and audit trail are persisted to Postgres.
+How a request flows: the user submits a prompt in the React UI → FastAPI ingests, governs, and logs it → the LangGraph orchestrator runs prompt engineering, LLM review, and any agent spawning in-process → live state streams to the UI over WebSockets → the response and audit trail are persisted to SQLite.
 
 ## Documentation
 
@@ -32,7 +32,7 @@ How a request flows: the user submits a prompt in the React UI → FastAPI inges
 - [Steps/](Steps/README.md) — a detailed, ready-to-use LLM prompt for executing each build plan step.
 - [Components/API.md](Components/API.md) — the FastAPI service, LangGraph orchestration, and local LLM loop.
 - [Components/WEB.md](Components/WEB.md) — the React frontend.
-- [Components/AUDIT.md](Components/AUDIT.md) — the Postgres log/audit store.
+- [Components/AUDIT.md](Components/AUDIT.md) — the SQLite log/audit store.
 - [DataRetention.md](DataRetention.md) — data retention and privacy safeguards: audit redaction and per-table retention windows.
 
 ## License

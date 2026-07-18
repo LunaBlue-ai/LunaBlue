@@ -35,6 +35,7 @@ export type RunPhase =
   | "received"
   | "governance"
   | "engineering"
+  | "enhancing"
   | "reviewing"
   | "spawning"
   | "responding"
@@ -79,6 +80,21 @@ export interface SessionSummary {
   created_at: string;
   last_activity_at: string;
   run_ids: string[];
+}
+
+/** Mirrors `SummaryResetResponse` in `api/schemas/state.py` (Step 20). */
+export interface SummaryResetResponse {
+  session_id: string;
+  cleared: boolean;
+}
+
+/** Mirrors `Identity` in `api/schemas/identity.py` (Step 20). */
+export interface Identity {
+  name: string;
+  age: string;
+  occupation: string;
+  personality: string;
+  interests: string;
 }
 
 /** Mirrors `AgentTaskRecord` in `api/schemas/state.py` (Step 14). */

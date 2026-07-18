@@ -1,6 +1,6 @@
 """Tests for the live run/session status endpoints (Step 10).
 
-The app is wired with fakes (no Postgres, no model file); the state store is
+The app is wired with fakes (no database, no model file); the state store is
 real — these tests verify the full pipeline → store → HTTP observation loop,
 including a mid-flight poll while the fake LLM is deliberately slow.
 """
@@ -21,6 +21,7 @@ _ALL_PHASES = [
     "received",
     "governance",
     "engineering",
+    "enhancing",
     "reviewing",
     "responding",
     "completed",
@@ -48,7 +49,11 @@ async def client(audit, runtime_and_fake, store):
         yield c
 
 
-async def test_completed_run_shows_the_full_phase_progression(client):
+async def test_completed_run_shows_the_full_phase_progression(
+    client, runtime_and_fake
+):
+    _, fake = runtime_and_fake
+    fake.queued_responses = ["hello"]  # enhancement call passes through
     resp = await client.post("/api/prompt", json={"text": "hello"})
     request_id = resp.json()["request_id"]
 
@@ -68,6 +73,7 @@ async def test_completed_run_shows_the_full_phase_progression(client):
     # Node attribution for the graph-driven phases.
     by_phase = {p["phase"]: p["node"] for p in body["phases"]}
     assert by_phase["engineering"] == "prompt_engineering"
+    assert by_phase["enhancing"] == "prompt_enhancement"
     assert by_phase["reviewing"] == "llm_review"
     assert by_phase["responding"] == "respond"
 
@@ -91,11 +97,13 @@ async def test_failed_run_shows_failed_with_the_error_summary(
     assert body["phase"] == "failed"
     assert "kaboom" in body["error"]
     assert body["result_summary"] is None
-    # It failed inside the first LLM call: the review phase was entered.
+    # The enhancement call fails too but swallows it (graceful fallback);
+    # the review call is the first whose failure fails the run.
     assert [p["phase"] for p in body["phases"]] == [
         "received",
         "governance",
         "engineering",
+        "enhancing",
         "reviewing",
         "failed",
     ]
@@ -182,20 +190,29 @@ async def test_in_flight_run_phase_is_visible_while_generating(
     assert [p["phase"] for p in body["phases"]] == _ALL_PHASES
 
 
-async def test_concurrent_submissions_keep_independent_run_states(client):
-    responses = await asyncio.gather(
-        *(
-            client.post("/api/prompt", json={"text": f"msg {i}"})
-            for i in range(3)
+async def test_concurrent_submissions_keep_independent_run_states(
+    audit, runtime_and_fake, store
+):
+    # Enhancement off: interleaved runs pop queued responses in
+    # nondeterministic order, so the per-run echo mapping below needs the
+    # prompt to reach respond unrewritten.
+    async with make_client(
+        audit, runtime_and_fake[0], store=store, enhancement=False
+    ) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post("/api/prompt", json={"text": f"msg {i}"})
+                for i in range(3)
+            )
         )
-    )
-    ids = [r.json()["request_id"] for r in responses]
-    assert len(set(ids)) == 3
-    for i, request_id in enumerate(ids):
-        body = (await client.get(f"/api/runs/{request_id}")).json()
-        assert body["phase"] == "completed"
-        assert body["result_summary"] == f"echo: msg {i}"
-        assert [p["phase"] for p in body["phases"]] == _ALL_PHASES
+        ids = [r.json()["request_id"] for r in responses]
+        assert len(set(ids)) == 3
+        expected_phases = [p for p in _ALL_PHASES if p != "enhancing"]
+        for i, request_id in enumerate(ids):
+            body = (await client.get(f"/api/runs/{request_id}")).json()
+            assert body["phase"] == "completed"
+            assert body["result_summary"] == f"echo: msg {i}"
+            assert [p["phase"] for p in body["phases"]] == expected_phases
 
 
 async def test_evicted_runs_404_while_the_audit_record_remains(
@@ -229,3 +246,35 @@ async def test_openapi_documents_the_status_endpoints(client):
     session_op = spec["paths"]["/api/sessions/{session_id}"]["get"]
     assert session_op["summary"]
     assert "404" in session_op["responses"]
+    reset_op = spec["paths"]["/api/sessions/{session_id}/summary/reset"]["post"]
+    assert reset_op["summary"]
+
+
+# -- summary reset (Step 20) --------------------------------------------------------
+
+
+async def test_reset_on_unknown_session_is_a_clean_noop(client, store):
+    resp = await client.post("/api/sessions/never-seen/summary/reset")
+    assert resp.status_code == 200
+    assert resp.json() == {"session_id": "never-seen", "cleared": False}
+    # No phantom session was upserted just to clear nothing.
+    assert store.get_session("never-seen") is None
+
+
+async def test_reset_clears_the_summary_and_is_idempotent(client, store):
+    # A run creates the session; seed its rolling summary directly (the
+    # fakes wire no summarizer by default, so nothing races this).
+    resp = await client.post(
+        "/api/prompt", json={"text": "hello", "session_id": "s-reset"}
+    )
+    assert resp.status_code == 200
+    await store.set_session_summary("s-reset", "accumulated context")
+
+    first = await client.post("/api/sessions/s-reset/summary/reset")
+    assert first.status_code == 200
+    assert first.json() == {"session_id": "s-reset", "cleared": True}
+    assert store.get_session_summary("s-reset") is None
+
+    second = await client.post("/api/sessions/s-reset/summary/reset")
+    assert second.status_code == 200
+    assert second.json()["cleared"] is True  # idempotent

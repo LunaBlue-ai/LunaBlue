@@ -6,6 +6,7 @@ const PHASE_LABELS: Record<string, string> = {
   received: "Queued",
   governance: "Checking governance",
   engineering: "Engineering the prompt",
+  enhancing: "Enhancing the prompt",
   reviewing: "Reviewing the draft",
   responding: "Writing the response",
   completed: "Finishing up",

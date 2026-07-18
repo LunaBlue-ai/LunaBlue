@@ -28,3 +28,9 @@ One prompt file per step of [BuildPlan.md](../BuildPlan.md). Each file is a self
 16. [Step16-TestSuites.md](Step16-TestSuites.md) — consolidated CI-ready suites with the LLM stubbed
 17. [Step17-Hardening.md](Step17-Hardening.md) — timeouts, graceful degradation, retention and redaction
 18. [Step18-ReleaseV1.md](Step18-ReleaseV1.md) — clean-machine verification, docs sync, v1.0 release
+
+## Post-v1.0
+
+19. [Step19-ClosedLoopPromptProcessing.md](Step19-ClosedLoopPromptProcessing.md) — internal LLM prompt enhancement + rolling per-session chat summary
+20. [Step20-SummaryResetAndIdentity.md](Step20-SummaryResetAndIdentity.md) — chat summary reset button + always-pinned identity fields
+21. [Step21-SqliteMigration.md](Step21-SqliteMigration.md) — audit database migrated from Postgres-in-Docker to file-based SQLite (supersedes Step 3's database setup)

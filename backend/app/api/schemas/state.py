@@ -3,7 +3,7 @@
 These models mirror the immutable snapshots produced by
 :mod:`app.state.store` (``from_attributes`` builds them straight from the
 frozen dataclasses). They describe *live* state only: evicted runs are gone
-from these endpoints while remaining fully present in the Postgres audit
+from these endpoints while remaining fully present in the audit
 record. Step 13's WebSocket events reuse the same shapes.
 """
 
@@ -79,6 +79,18 @@ class SessionSummary(BaseModel):
     created_at: datetime = Field(description="When the session was first seen (UTC).")
     last_activity_at: datetime = Field(description="Last session activity (UTC).")
     run_ids: list[str] = Field(description="Retained run ids, newest first.")
+
+
+class SummaryResetResponse(BaseModel):
+    """Outcome of a chat-summary reset (Step 20)."""
+
+    session_id: str = Field(description="The session that was targeted.")
+    cleared: bool = Field(
+        description=(
+            "True when a reset was applied to an existing session; false "
+            "when the session was unknown (nothing to clear)."
+        )
+    )
 
 
 class AgentTaskRecord(BaseModel):

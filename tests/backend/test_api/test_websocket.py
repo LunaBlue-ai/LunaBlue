@@ -2,7 +2,7 @@
 
 These use Starlette's sync TestClient as a context manager so HTTP requests
 and WebSocket sessions share one event loop (required: the EventBus queues
-are loop-bound). The real lifespan needs Postgres and a model file, so it is
+are loop-bound). The real lifespan needs a database and a model file, so it is
 replaced with a no-op — the fakes wiring in :func:`tests.backend.fakes.make_app`
 already provides everything the routes read from ``app.state``.
 """
@@ -22,6 +22,7 @@ _RUN_PHASES = [
     "received",
     "governance",
     "engineering",
+    "enhancing",
     "reviewing",
     "responding",
     "completed",

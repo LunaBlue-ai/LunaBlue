@@ -1,7 +1,9 @@
 """Shared in-memory fakes and app wiring helpers: the suite runs without
-Postgres, a model file, or the ``llama-cpp-python`` package."""
+a database server, a model file, or the ``llama-cpp-python`` package."""
 
+import random
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,11 +12,14 @@ from httpx import ASGITransport, AsyncClient
 from app.audit.service import AgentEvent
 from app.governance.intake import PromptIntake
 from app.governance.policy import PolicyEngine
+from app.llm.embedding import EmbeddingRuntime
 from app.llm.runtime import LlamaRuntime
 from app.main import create_app
 from app.orchestration.pipeline import PromptPipeline
 from app.orchestration.runner import AgentRunner
+from app.orchestration.summarizer import SessionSummarizer
 from app.state.events import EventBus
+from app.state.identity import IdentityStore
 from app.state.store import StateStore
 
 
@@ -22,9 +27,11 @@ class FakeLlama:
     """Mimics ``llama_cpp.Llama`` closely enough for the tests.
 
     Knobs: ``block_seconds`` simulates slow blocking inference,
-    ``fail_with`` makes the next completions raise, ``queued_responses``
-    replaces the default ``echo:`` reply (popped in order, one per call) —
-    e.g. to feed the review node a JSON verdict.
+    ``fail_with`` makes the next completions raise (every call until
+    cleared), ``fail_once`` makes exactly one completion raise (e.g. to fail
+    the enhancement call while review/respond still answer), and
+    ``queued_responses`` replaces the default ``echo:`` reply (popped in
+    order, one per call) — e.g. to feed the review node a JSON verdict.
     """
 
     def __init__(self, *, model_path, n_ctx, n_gpu_layers, verbose, **_):
@@ -36,6 +43,7 @@ class FakeLlama:
         self.concurrent_entry = False
         self.block_seconds = 0.0
         self.fail_with: Exception | None = None
+        self.fail_once: Exception | None = None
         self.queued_responses: list[str] = []
         self.closed = False
 
@@ -47,6 +55,9 @@ class FakeLlama:
         try:
             if self.block_seconds:
                 time.sleep(self.block_seconds)  # simulates blocking inference
+            if self.fail_once is not None:
+                exc, self.fail_once = self.fail_once, None
+                raise exc
             if self.fail_with is not None:
                 raise self.fail_with
             self.calls.append({"messages": messages, **params})
@@ -95,6 +106,8 @@ class FakeLlamaRuntime(LlamaRuntime):
 
     def load(self) -> None:
         # The real load() insists the model file exists; the fake needs none.
+        # GPU offload support stays None (unknown): the fake never probes
+        # llama_cpp, so model_info reports gpu_offload_supported=None.
         self.fake = FakeLlama(
             model_path=self._model_path,
             n_ctx=self._context_size,
@@ -111,6 +124,63 @@ class FakeLlamaRuntime(LlamaRuntime):
             next(m["content"] for m in call["messages"] if m["role"] == "user")
             for call in self.fake.calls
         ]
+
+
+class FakeEmbeddingLlama:
+    """Mimics ``llama_cpp.Llama(embedding=True)`` for the tests.
+
+    ``embed`` returns a deterministic pseudo-random vector seeded from the
+    input text (identical text always embeds identically); queue exact
+    vectors via ``queued_vectors`` when a test needs to control distances.
+    ``fail_with`` makes every embed call raise until cleared.
+    """
+
+    RAW_DIMS = 768
+
+    def __init__(
+        self, *, model_path, n_ctx, n_gpu_layers, embedding=False, verbose=False, **_
+    ):
+        self.model_path = model_path
+        self.n_ctx = n_ctx
+        self.n_gpu_layers = n_gpu_layers
+        self.embedding = embedding
+        self.calls: list[str] = []
+        self.queued_vectors: list[list[float]] = []
+        self.fail_with: Exception | None = None
+        self.closed = False
+
+    def embed(self, text: str) -> list[float]:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.calls.append(text)
+        if self.queued_vectors:
+            return self.queued_vectors.pop(0)
+        rng = random.Random(zlib.crc32(text.encode("utf-8")))
+        return [rng.uniform(-1.0, 1.0) for _ in range(self.RAW_DIMS)]
+
+    def close(self):
+        self.closed = True
+
+
+def make_embedding_runtime(
+    tmp_path, **kwargs
+) -> tuple[EmbeddingRuntime, FakeEmbeddingLlama]:
+    """A loaded embedding runtime backed by FakeEmbeddingLlama."""
+    model_file = tmp_path / "embedding.gguf"
+    model_file.write_bytes(b"gguf")
+    holder: list[FakeEmbeddingLlama] = []
+
+    def factory(**factory_kwargs):
+        fake = FakeEmbeddingLlama(**factory_kwargs)
+        holder.append(fake)
+        return fake
+
+    runtime = EmbeddingRuntime(
+        model_path=str(model_file), llama_factory=factory, **kwargs
+    )
+    runtime.load()
+    assert runtime.available
+    return runtime, holder[0]
 
 
 def make_runtime(tmp_path, **kwargs) -> tuple[LlamaRuntime, FakeLlama]:
@@ -218,12 +288,26 @@ def make_app(
     max_queue_depth: int = 0,
     agent_timeout: float = 0.0,
     agent_max_steps: int = 0,
+    enhancement: bool = True,
+    summary: bool = False,
+    identity: IdentityStore | None = None,
+    embedding_runtime: EmbeddingRuntime | None = None,
+    embedding_indexer=None,
 ):
     """App instance wired like the lifespan does, with fakes (no lifespan).
 
     The Step 17 guards (``max_queue_depth``, ``agent_timeout``,
     ``agent_max_steps``) default to disabled so happy-path tests are
     unaffected; guard tests opt in per instance.
+
+    ``enhancement`` mirrors the production default (on): the enhancement
+    LLM call is synchronous inside the request, so it stays deterministic.
+    ``summary`` defaults OFF here, unlike production: the background
+    summarize call pops ``queued_responses`` and appends to ``calls`` at a
+    nondeterministic time, which would poison any test that scripts
+    responses or asserts call lists. Closed-loop tests opt in with
+    ``summary=True`` and synchronize via
+    ``app.state.session_summarizer.wait_idle()``.
     """
     app = create_app()
     intake = PromptIntake(PolicyEngine(strict_mode=strict))
@@ -234,6 +318,8 @@ def make_app(
     app.state.audit_service = audit
     app.state.prompt_intake = intake
     app.state.llm_runtime = runtime
+    app.state.embedding_runtime = embedding_runtime
+    app.state.embedding_indexer = embedding_indexer
     app.state.state_store = store
     app.state.event_bus = event_bus
     # Not started here (starting workers needs a running loop); tests that
@@ -246,6 +332,15 @@ def make_app(
         max_steps=agent_max_steps,
     )
     app.state.agent_runner = runner
+    summarizer = None
+    if summary:
+        summarizer = SessionSummarizer(runtime=runtime, store=store)
+    app.state.session_summarizer = summarizer
+    # Empty identity by default: format_block() is "" so nothing changes in
+    # the injected summary for tests that don't opt in.
+    if identity is None:
+        identity = IdentityStore()
+    app.state.identity = identity
     app.state.prompt_pipeline = PromptPipeline(
         intake=intake,
         runtime=runtime,
@@ -254,6 +349,9 @@ def make_app(
         timeout_seconds=timeout,
         runner=runner,
         max_queue_depth=max_queue_depth,
+        summarizer=summarizer,
+        enhancement_enabled=enhancement,
+        identity=identity,
     )
     return app
 
@@ -266,8 +364,16 @@ def make_client(
     timeout: float = 5.0,
     store: StateStore | None = None,
     max_queue_depth: int = 0,
+    enhancement: bool = True,
+    summary: bool = False,
+    identity: IdentityStore | None = None,
+    embedding_runtime: EmbeddingRuntime | None = None,
 ) -> AsyncClient:
-    """HTTP client over a fake-wired app (see :func:`make_app`)."""
+    """HTTP client over a fake-wired app (see :func:`make_app`).
+
+    The wired app is exposed as ``client.app`` so tests can reach
+    ``client.app.state`` (e.g. ``session_summarizer.wait_idle()``).
+    """
     app = make_app(
         audit,
         runtime,
@@ -275,5 +381,11 @@ def make_client(
         timeout=timeout,
         store=store,
         max_queue_depth=max_queue_depth,
+        enhancement=enhancement,
+        summary=summary,
+        identity=identity,
+        embedding_runtime=embedding_runtime,
     )
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    client.app = app
+    return client

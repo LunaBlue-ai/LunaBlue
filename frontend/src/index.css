@@ -63,7 +63,13 @@ body {
   font-size: 1.25rem;
 }
 
-.agent-panel-toggle {
+.app-header-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.agent-panel-toggle,
+.identity-toggle {
   padding: 0.25rem 0.75rem;
   font: inherit;
   font-size: 0.85rem;
@@ -74,7 +80,8 @@ body {
   cursor: pointer;
 }
 
-.agent-panel-toggle[aria-expanded="true"] {
+.agent-panel-toggle[aria-expanded="true"],
+.identity-toggle[aria-expanded="true"] {
   background: var(--accent-soft);
   border-color: var(--accent);
 }
@@ -108,6 +115,33 @@ body {
   min-width: 0;
   gap: 0.75rem;
   padding-bottom: 0.75rem;
+}
+
+.chat-header {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Low-emphasis action: clears internal context, not the visible transcript. */
+.chat-clear-summary {
+  padding: 0.15rem 0.6rem;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.chat-clear-summary:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.chat-clear-summary:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .message-list {
@@ -460,6 +494,96 @@ body {
 
 .agent-event-time {
   margin-left: auto;
+}
+
+/* Identity panel (Step 20) */
+
+.identity-panel {
+  display: flex;
+  flex-direction: column;
+  width: 18rem;
+  flex-shrink: 0;
+  min-height: 0;
+  margin-bottom: 0.75rem;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow-y: auto;
+}
+
+.identity-panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.identity-hint {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.identity-error {
+  margin: 0 0 0.75rem;
+  color: var(--error);
+  font-size: 0.8rem;
+}
+
+.identity-panel form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.identity-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.identity-panel input {
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+}
+
+.identity-panel input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.identity-panel button {
+  align-self: flex-end;
+  padding: 0.3rem 1rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+.identity-panel button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 56rem) {
+  .identity-panel {
+    width: auto;
+    max-height: 45%;
+  }
 }
 
 /* Status bar */

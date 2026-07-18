@@ -196,7 +196,7 @@ async def get_agent_detail(
             events = await audit.fetch_agent_events(agent_id)
         except Exception as exc:
             # Don't claim "not found" when the durable record is merely
-            # unreachable (e.g. Postgres down).
+            # unreachable (e.g. the audit database unwritable).
             logger.exception("agent_events lookup failed for %s", agent_id)
             raise HTTPException(
                 status_code=503,

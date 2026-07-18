@@ -13,11 +13,13 @@ import type {
   AgentState,
   AgentSummary,
   HealthStatus,
+  Identity,
   PromptRequest,
   PromptResponse,
   ReadinessStatus,
   RunStatus,
   SessionStatus,
+  SummaryResetResponse,
 } from "../types";
 
 /** Same-origin base path; the Vite dev server proxies it to FastAPI. */
@@ -194,4 +196,32 @@ export function cancelAgent(agentId: string): Promise<AgentSummary> {
     `/agents/${encodeURIComponent(agentId)}/cancel`,
     { method: "POST" },
   );
+}
+
+/**
+ * POST /api/sessions/{id}/summary/reset — clear the assistant's internal
+ * rolling summary of this conversation (Step 20). Idempotent; identity
+ * fields are unaffected.
+ */
+export function resetChatSummary(
+  sessionId: string,
+): Promise<SummaryResetResponse> {
+  return request<SummaryResetResponse>(
+    `/sessions/${encodeURIComponent(sessionId)}/summary/reset`,
+    { method: "POST" },
+  );
+}
+
+/** GET /api/identity — the identity fields pinned into the chat summary. */
+export function getIdentity(): Promise<Identity> {
+  return request<Identity>("/identity");
+}
+
+/** PUT /api/identity — full replace; omitted fields are blanked. */
+export function updateIdentity(identity: Identity): Promise<Identity> {
+  return request<Identity>("/identity", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(identity),
+  });
 }

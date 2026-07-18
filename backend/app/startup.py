@@ -12,6 +12,7 @@ come back as warnings for the lifespan to log.
 """
 
 import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -67,10 +68,30 @@ def _check_database_url(settings: Settings, problems: list[str]) -> None:
             f"{exc})."
         )
         return
-    if not url.drivername.startswith("postgresql"):
+    if url.drivername != "sqlite+aiosqlite":
         problems.append(
-            "DATABASE_URL: expected a postgresql+asyncpg URL, got driver "
+            "DATABASE_URL: expected a sqlite+aiosqlite URL (Step 21 — the "
+            f"audit store is a local SQLite file), got driver "
             f"{url.drivername!r}."
+        )
+        return
+    # The database is a local file created on demand; what can actually be
+    # misconfigured is the location. Verify the parent directory can exist
+    # and is writable.
+    path = settings.resolved_database_path
+    if path is None:
+        problems.append("DATABASE_URL: sqlite URL has no database path.")
+        return
+    parent = path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        probe = parent / f".write-probe-{os.getpid()}"
+        probe.touch()
+        probe.unlink()
+    except OSError as exc:
+        problems.append(
+            f"DATABASE_URL: database directory {str(parent)!r} is not "
+            f"writable ({type(exc).__name__}: {exc})."
         )
 
 
@@ -98,6 +119,43 @@ def _check_bounds(settings: Settings, problems: list[str]) -> None:
         settings.llm_max_queue_depth >= 0,
         "LLM_MAX_QUEUE_DEPTH must be >= 0 (0 disables the busy guard).",
     )
+    require(
+        settings.embedding_gpu_layers >= -1,
+        "EMBEDDING_GPU_LAYERS must be >= -1 (-1 offloads all layers, "
+        "0 is CPU-only).",
+    )
+    require(
+        settings.embedding_context_size >= 1,
+        "EMBEDDING_CONTEXT_SIZE must be >= 1.",
+    )
+    require(
+        1 <= settings.embedding_dimensions <= 768,
+        "EMBEDDING_DIMENSIONS must be between 1 and 768 (the default "
+        "model's native size).",
+    )
+    require(
+        settings.prompt_enhancement_max_tokens >= 1,
+        "PROMPT_ENHANCEMENT_MAX_TOKENS must be >= 1.",
+    )
+    require(
+        settings.session_summary_max_chars >= 1,
+        "SESSION_SUMMARY_MAX_CHARS must be >= 1.",
+    )
+    require(
+        settings.session_summary_max_tokens >= 1,
+        "SESSION_SUMMARY_MAX_TOKENS must be >= 1.",
+    )
+    for env_name, value in (
+        ("IDENTITY_NAME", settings.identity_name),
+        ("IDENTITY_AGE", settings.identity_age),
+        ("IDENTITY_OCCUPATION", settings.identity_occupation),
+        ("IDENTITY_PERSONALITY", settings.identity_personality),
+        ("IDENTITY_INTERESTS", settings.identity_interests),
+    ):
+        require(
+            len(value) <= 200,
+            f"{env_name} must be at most 200 characters.",
+        )
     require(1 <= settings.port <= 65535, "PORT must be between 1 and 65535.")
     require(
         settings.ws_heartbeat_seconds >= 0,

@@ -1,6 +1,7 @@
-# LunaBlue CI (Step 16): lint + backend suite against a Postgres service,
-# and frontend type-check + build + tests. No GPU, model file, or
-# llama-cpp-python anywhere — the suite runs on the fake runtime by design.
+# LunaBlue CI (Step 16): lint + backend suite, and frontend type-check +
+# build + tests. No GPU, model file, llama-cpp-python, or database service
+# anywhere — the suite runs on the fake runtime, and database tests use a
+# temp-file SQLite database automatically (Step 21).
 name: CI
 
 on:
@@ -16,26 +17,6 @@ jobs:
   backend:
     name: Backend (ruff + pytest)
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: lunablue_test
-          POSTGRES_PASSWORD: lunablue_test
-          POSTGRES_DB: lunablue_test
-        # Same host port the local docker-compose postgres-test service uses,
-        # so the suite's default LUNABLUE_TEST_DATABASE_URL applies unchanged.
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U lunablue_test -d lunablue_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      # Postgres is provisioned above: database-backed tests must run, never
-      # skip (a skip would silently shrink the suite).
-      LUNABLUE_TEST_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,7 +29,9 @@ jobs:
       - name: Lint
         run: ruff check backend/app tests/backend
       - name: Backend test suite
-        run: pytest
+        # Database tests run against a temp SQLite file with no skip path;
+        # -W-style skip auditing is unnecessary, but keep the summary loud.
+        run: pytest -ra
 
   frontend:
     name: Frontend (tsc + build + vitest)

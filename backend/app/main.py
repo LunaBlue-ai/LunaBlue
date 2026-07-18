@@ -1,5 +1,6 @@
 """Application factory for the LunaBlue backend."""
 
+import asyncio
 import logging
 import mimetypes
 from collections.abc import AsyncIterator
@@ -13,21 +14,29 @@ from app import __version__
 from app.api import websocket
 from app.api.errors import install_error_handling
 from app.api.routes import api_router
-from app.audit import db
+from app.audit import db, vectors
 from app.audit.redaction import Redactor
 from app.audit.service import AuditService
 from app.config import get_settings
 from app.governance.intake import PromptIntake
 from app.governance.policy import PolicyEngine
-from app.llm.runtime import LlamaRuntime, ModelNotFoundError
+from app.llm.runtime import (
+    LlamaRuntime,
+    LlamaRuntimeUnavailableError,
+    ModelNotFoundError,
+)
+from app.llm.embedding import EmbeddingRuntime
+from app.orchestration.indexer import EmbeddingIndexer
 from app.orchestration.pipeline import PromptPipeline
 from app.orchestration.runner import AgentRunner
+from app.orchestration.summarizer import SessionSummarizer
 from app.startup import (
     StartupValidationError,
     check_database_connects,
     validate_settings,
 )
 from app.state.events import EventBus
+from app.state.identity import IdentityStore
 from app.state.store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -61,7 +70,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # reported in one actionable message before anything is constructed.
     problems, warnings = validate_settings(settings, static_dir=_STATIC_DIR)
     if settings.startup_validate_db and not problems:
-        db_problem = await check_database_connects(settings.database_url)
+        db_problem = await check_database_connects(settings.resolved_database_url)
         if db_problem is not None:
             problems.append(db_problem)
     if problems:
@@ -70,7 +79,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise error
     for warning in warnings:
         logger.warning("%s", warning)
-    db.init_engine(settings.database_url)
+    # Step 21: the audit database is a local SQLite file created on demand —
+    # apply the Alembic schema before anything connects. Runs in a worker
+    # thread because env.py drives its own event loop (asyncio.run). A
+    # failing migration aborts startup: an audit system must not boot
+    # half-schema'd.
+    await asyncio.to_thread(db.run_migrations, settings.resolved_database_url)
+    db.init_engine(settings.resolved_database_url)
+    # Embeddings (optional enhancement): a second small GGUF embeds stored
+    # prompts/responses into the sqlite-vec store for /api/search. Missing
+    # model or unusable sqlite-vec extension degrades with a warning —
+    # never blocks startup.
+    embedding_runtime = None
+    embedding_indexer = None
+    if settings.embedding_enabled:
+        embedding_runtime = EmbeddingRuntime(
+            model_path=str(settings.resolved_embedding_model_path),
+            context_size=settings.embedding_context_size,
+            gpu_layers=settings.embedding_gpu_layers,
+            dimensions=settings.embedding_dimensions,
+        )
+        embedding_runtime.load()
+        vec_ready = await vectors.ensure_schema(
+            db.get_engine(), settings.embedding_dimensions
+        )
+        if embedding_runtime.available and vec_ready:
+            embedding_indexer = EmbeddingIndexer(embedding_runtime)
+    app.state.embedding_runtime = embedding_runtime
+    app.state.embedding_indexer = embedding_indexer
     redactor = (
         Redactor(extra_patterns=settings.audit_redaction_patterns)
         if settings.audit_redaction_enabled
@@ -80,6 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.audit_max_queue_size,
         redactor=redactor,
         drop_log_interval=settings.audit_drop_log_interval_seconds,
+        indexer=embedding_indexer,
     )
     audit_service.start()
     app.state.audit_service = audit_service
@@ -89,8 +126,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.prompt_intake = intake
     # The single global LLM runtime (docs/Architecture.md). Loading is
-    # deliberately fail-fast: a missing model file aborts startup with an
-    # actionable message rather than serving a half-alive process.
+    # deliberately fail-fast: a missing model file or an unloadable
+    # llama-cpp-python build (e.g. a CUDA wheel mismatching the driver)
+    # aborts startup with an actionable message rather than serving a
+    # half-alive process.
     runtime = LlamaRuntime(
         model_path=str(settings.resolved_model_path),
         context_size=settings.llm_context_size,
@@ -101,11 +140,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     try:
         runtime.load()
-    except ModelNotFoundError as exc:
+    except (ModelNotFoundError, LlamaRuntimeUnavailableError) as exc:
         logger.error("%s", exc)
         # Tear down what startup already built; the finally below never runs
         # when startup itself raises.
         await audit_service.close()
+        if embedding_runtime is not None:
+            embedding_runtime.close()
         await db.dispose_engine()
         raise
     app.state.llm_runtime = runtime
@@ -134,6 +175,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     agent_runner.start()
     app.state.agent_runner = agent_runner
+    # Closed-loop prompt processing: the rolling per-session chat summary,
+    # maintained in the background after each completed turn.
+    summarizer = None
+    if settings.session_summary_enabled:
+        summarizer = SessionSummarizer(
+            runtime=runtime,
+            store=state_store,
+            max_chars=settings.session_summary_max_chars,
+            max_tokens=settings.session_summary_max_tokens,
+        )
+    app.state.session_summarizer = summarizer
+    # Identity fields (Step 20): env defaults, runtime-editable via
+    # PUT /api/identity; pinned into every injected chat summary. In-memory
+    # — nothing to tear down.
+    identity = IdentityStore.from_settings(settings)
+    app.state.identity = identity
     app.state.prompt_pipeline = PromptPipeline(
         intake=intake,
         runtime=runtime,
@@ -142,16 +199,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout_seconds=settings.llm_timeout_seconds,
         runner=agent_runner,
         max_queue_depth=settings.llm_max_queue_depth,
+        summarizer=summarizer,
+        enhancement_enabled=settings.prompt_enhancement_enabled,
+        enhancement_max_tokens=settings.prompt_enhancement_max_tokens,
+        identity=identity,
+        summary_max_chars=settings.session_summary_max_chars,
     )
     try:
         yield
     finally:
-        # Cancel running/pending agents first so their cancellation audit
-        # events are still queued, then drain queued audit events before
-        # tearing down the engine they write through.
+        # Pending summary updates are disposable in-memory state — cancel
+        # them first so nothing new enters the generation queue, then cancel
+        # running/pending agents so their cancellation audit events are still
+        # queued, then drain queued audit events before tearing down the
+        # engine they write through.
+        if summarizer is not None:
+            await summarizer.aclose()
         await agent_runner.close()
         await audit_service.close()
+        # After the audit drain: nothing schedules new embeddings anymore.
+        # Pending embedding writes are recoverable via the backfill script,
+        # so cancelling them is safe.
+        if embedding_indexer is not None:
+            await embedding_indexer.aclose()
         runtime.close()
+        if embedding_runtime is not None:
+            embedding_runtime.close()
         await db.dispose_engine()
         logger.info("LunaBlue backend shutting down")
 

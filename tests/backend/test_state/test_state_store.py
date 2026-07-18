@@ -304,3 +304,47 @@ async def test_live_agents_are_never_evicted():
     # ... and leave immediately once settled.
     await tight.update_agent("agent-2", state="cancelled")
     assert tight.get_agent("agent-2") is None
+
+
+# -- session summary (closed-loop prompt processing) --------------------------------
+
+
+async def test_session_summary_round_trip(store):
+    await store.start_run("req-1", "sess-1")
+    assert store.get_session_summary("sess-1") is None  # empty reads as None
+
+    await store.set_session_summary("sess-1", "user likes cats")
+    assert store.get_session_summary("sess-1") == "user likes cats"
+
+    await store.set_session_summary("sess-1", "user likes cats and dogs")
+    assert store.get_session_summary("sess-1") == "user likes cats and dogs"
+
+
+async def test_session_summary_upserts_unknown_sessions(store):
+    assert store.get_session_summary("sess-new") is None
+    await store.set_session_summary("sess-new", "background context")
+    assert store.get_session_summary("sess-new") == "background context"
+    assert store.get_session("sess-new") is not None
+
+
+async def test_session_summary_never_reaches_the_snapshot(store):
+    """The summary is internal-only: structurally absent from the frozen
+    public view, so it can never leak into a wire payload."""
+    await store.start_run("req-1", "sess-1")
+    await store.set_session_summary("sess-1", "secret rolling summary")
+    snapshot = store.get_session("sess-1")
+    assert not hasattr(snapshot, "summary")
+    assert "secret rolling summary" not in repr(snapshot)
+
+
+async def test_set_session_summary_emits_nothing(store):
+    events: list[StoreEvent] = []
+    store.set_notify(events.append)
+    await store.start_run("req-1", "sess-1")
+    baseline = len(events)
+
+    before = store.get_session("sess-1").last_activity_at
+    await store.set_session_summary("sess-1", "quiet update")
+
+    assert len(events) == baseline  # nothing publicly observable changed
+    assert store.get_session("sess-1").last_activity_at == before
